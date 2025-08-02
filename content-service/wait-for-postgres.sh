@@ -13,7 +13,7 @@ echo "🔄 Waiting for Postgres at $host:$port (user: $user)..."
 
 attempt=0
 while true; do
-  if psql "host=$host port=$port user=$user dbname=$dbname sslmode=disable" -c '\q'; then
+  if psql "host=$host port=$port user=$user dbname=$dbname sslmode=require" -c '\q'; then
     echo "✅ Postgres is ready. Starting service..."
     break
   else
