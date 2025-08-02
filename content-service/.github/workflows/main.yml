@@ -1,0 +1,37 @@
+# .github/workflows/deploy-content.yml
+name: 🚀 Deploy Content-Service
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'content-service/**'
+
+jobs:
+  deploy-content:
+    name: Deploy Content-Service
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: SSH & Deploy
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key:    ${{ secrets.SSH_PRIVATE_KEY }}
+          port:   ${{ secrets.SSH_PORT }}
+          script: |
+            set -e
+            cd ~/streaming-app/content-service
+            git fetch origin main
+            git reset --hard origin/main
+
+            docker compose down content-service
+            docker compose build content-service
+            docker compose up -d content-service
+
+            docker image prune -f

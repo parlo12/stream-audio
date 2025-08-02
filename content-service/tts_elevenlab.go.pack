@@ -1,0 +1,79 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+)
+
+// elevenLabsTTSURLTemplate formats the TTS endpoint URL.
+// It uses a placeholder for voice_id which will be provided via environment variable.
+const elevenLabsTTSURLTemplate = "https://api.elevenlabs.io/v1/text-to-speech/%s/stream/with-timestamps?output_format=mp3_44100_128"
+
+// TTSRequest represents the JSON payload required by ElevenLabs' TTS endpoint.
+type TTSRequest struct {
+	Text    string `json:"text"`
+	ModelID string `json:"model_id,omitempty"` // Optional; if omitted, defaults will be used.
+	// You can add further fields like language_code, voice_settings, etc. per the documentation.
+}
+
+// convertTextToAudio calls ElevenLabs' TTS endpoint with the provided text.
+// It returns the response from the API (typically a stream of JSON responses or a final output) as a string.
+func convertTextToAudio(text string) (string, error) {
+	// Get the voice_id and api key from environment variables.
+	voiceID := os.Getenv("ELEVENLABS_VOICE_ID")
+	if voiceID == "" {
+		return "", errors.New("ELEVENLABS_VOICE_ID environment variable not set")
+	}
+	apiKey := os.Getenv("XI_API_KEY")
+	if apiKey == "" {
+		return "", errors.New("XI_API_KEY environment variable not set")
+	}
+
+	// Construct the URL using the voice ID.
+	url := fmt.Sprintf(elevenLabsTTSURLTemplate, voiceID)
+
+	// Create the JSON payload.
+	payload := TTSRequest{
+		Text:    text,
+		ModelID: "eleven_multilingual_v2", // Use the model you prefer (adjust if necessary)
+	}
+	reqBody, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal TTS payload: %w", err)
+	}
+
+	// Create the HTTP POST request.
+	req, err := http.NewRequest("POST", url, bytes.NewReader(reqBody))
+	if err != nil {
+		return "", fmt.Errorf("failed to create TTS request: %w", err)
+	}
+	req.Header.Add("xi-api-key", apiKey)
+	req.Header.Add("Content-Type", "application/json")
+
+	// Use the default HTTP client.
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("TTS API request error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Check if we got a successful status code.
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("TTS API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// For simplicity, read the entire response (in a real scenario, handle stream processing if needed).
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read TTS API response: %w", err)
+	}
+
+	// Return the response content (it might contain base64 encoded audio and timestamp details).
+	return string(bodyBytes), nil
+}

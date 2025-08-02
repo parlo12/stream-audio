@@ -1,0 +1,35 @@
+name: 🚀 Deploy Auth-Service
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH & Deploy Auth-Service
+        uses: appleboy/ssh-action@master
+        with:
+          host:      ${{ secrets.VM_HOST }}
+          username:  ${{ secrets.VM_USER }}
+          key:       ${{ secrets.VM_SSH_KEY }}
+          port:      ${{ secrets.VM_SSH_PORT }}
+          script: |
+            set -e
+
+            # go into the Git repo for auth-service
+            cd /home/opc/streaming-app/auth-service
+
+            # sync to latest main
+            git fetch origin main
+            git reset --hard origin/main
+
+            # rebuild & restart only auth-service
+            docker compose down
+            docker compose build auth-service
+            docker compose up -d auth-service
+
+            # optional cleanup
+            docker image prune -f
