@@ -194,7 +194,7 @@ func setupDatabase() {
 		" password=" + dbPassword +
 		" dbname=" + dbName +
 		" port=" + dbPort +
-		" sslmode=require TimeZone=UTC"
+		" sslmode=disable TimeZone=UTC"
 
 	var err error
 	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
