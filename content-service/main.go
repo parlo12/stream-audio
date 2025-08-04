@@ -115,7 +115,7 @@ func main() {
 
 	// Health check/root response
 	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"message": "Auth service is running at https://streamingaudioapp-h8npe.ondigitalocean.app"})
+		c.JSON(http.StatusOK, gin.H{"message": "Auth service is running at https://134.199.197.75:8083/health"})
 	})
 
 	// ✅ Serve static audio files from ./audio
