@@ -53,6 +53,7 @@ services:
       - "8082:8082"
     depends_on:
       - redis
+      - postgres
     env_file:
       - .env
     volumes:
@@ -66,7 +67,8 @@ services:
       DB_USER:        "${DB_USER}"
       DB_PASSWORD:    "${DB_PASSWORD}"
       # pass through your new flag:
-      DB_SSLMODE: "disable"
+      DB_SSLMODE:     "disable"
+      PGSSLMODE:      "disable"
 
       # enforce SSL
       #PGSSLMODE:      require
@@ -87,6 +89,7 @@ services:
       - redis
       - minio
       - mqtt-broker
+      - postgres
     env_file:
       - .env
     volumes:
@@ -99,8 +102,8 @@ services:
       DB_USER:        "${DB_USER}"
       DB_PASSWORD:    "${DB_PASSWORD}"
       # pass through your new flag:
-      DB_SSLMODE: "disable"
-      # PGSSLMODE:      require
+      DB_SSLMODE:     "disable"
+      PGSSLMODE:      "disable"
       # PGSSLROOTCERT:  /certs/do-postgres-ca.crt
 
       # other vars:
