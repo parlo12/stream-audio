@@ -1,5 +1,5 @@
-#!/bin/sh
-set -e
+ #!/bin/sh
+ set -e
 
 host="${DB_HOST}"
 port="${DB_PORT:-5432}"
@@ -7,7 +7,7 @@ user="${DB_USER}"
 password="${DB_PASSWORD}"
 dbname="${DB_NAME}"
 
-export PGPASSWORD="$password"
+ export PGPASSWORD="$password"
 
 echo "🔄 Waiting for Postgres at $host:$port (user: $user)..."
 
@@ -19,6 +19,11 @@ while ! psql "host=$host port=$port user=$user dbname=$dbname sslmode=require ss
 done
 
 echo "✅ Postgres is ready. Starting service..."
-unset PGPASSWORD
 
-exec "$@"
+ # Debug: confirm what will be executed
+
+ echo "🚀 Launching app: $@"
+ echo "----------------------------------------"
+ 
+ unset PGPASSWORD
+ exec "$@"
