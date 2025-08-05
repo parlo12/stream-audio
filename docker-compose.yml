@@ -65,6 +65,9 @@ services:
       DB_NAME:        "${DB_NAME}"
       DB_USER:        "${DB_USER}"
       DB_PASSWORD:    "${DB_PASSWORD}"
+      # pass through your new flag:
+      DB_SSLMODE: "${DB_SSLMODE}"
+
       # enforce SSL
       PGSSLMODE:      require
       PGSSLROOTCERT:  /certs/do-postgres-ca.crt
@@ -95,6 +98,8 @@ services:
       DB_NAME:        "${DB_NAME}"
       DB_USER:        "${DB_USER}"
       DB_PASSWORD:    "${DB_PASSWORD}"
+      # pass through your new flag:
+      DB_SSLMODE: "${DB_SSLMODE}"
       PGSSLMODE:      require
       PGSSLROOTCERT:  /certs/do-postgres-ca.crt
 

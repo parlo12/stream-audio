@@ -189,12 +189,12 @@ func setupDatabase() {
 	dbPassword := getEnv("DB_PASSWORD", "")
 	dbName := getEnv("DB_NAME", "")
 	dbPort := getEnv("DB_PORT", "")
-	dsn := "host=" + dbHost +
-		" user=" + dbUser +
-		" password=" + dbPassword +
-		" dbname=" + dbName +
-		" port=" + dbPort +
-		" sslmode=require TimeZone=UTC"
+	sslMode := getEnv("DB_SSLMODE", "disable") // “disable” for local, override to “require” in prod
+	// Build the DSN string
+	dsn := fmt.Sprintf(
+		"host=%s user=%s password=%s dbname=%s port=%s sslmode=%s TimeZone=UTC",
+		dbHost, dbUser, dbPassword, dbName, dbPort, sslMode,
+	)
 
 	var err error
 	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})

@@ -6,6 +6,7 @@ port="${DB_PORT:-5432}"
 user="${DB_USER}"
 password="${DB_PASSWORD}"
 dbname="${DB_NAME}"
+sslmode="${DB_SSLMODE:-require}"
 
 export PGPASSWORD="$password"
 
@@ -13,7 +14,7 @@ echo "🔄 Waiting for Postgres at $host:$port (user: $user)..."
 
 attempt=0
 while true; do
-  if psql "host=$host port=$port user=$user dbname=$dbname sslmode=require" -c '\q'; then
+  if psql "host=$host port=$port user=$user dbname=$dbname sslmode=$sslmode" -c '\q'; then
     echo "✅ Postgres is ready. Starting service..."
     break
   else

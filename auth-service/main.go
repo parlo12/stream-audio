@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -97,33 +98,41 @@ func main() {
 	router.Run(":" + port)
 }
 
+// getEnv is assumed to be your helper that reads an env var or returns the default.
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
 func setupDatabase() {
-	// Get database configuration from environment variables or use defaults
-	dbHost := getEnv("DB_HOST", "")
-	dbUser := getEnv("DB_USER", "")
+	// Read from env, or default to sensible values
+	dbHost := getEnv("DB_HOST", "localhost")
+	dbUser := getEnv("DB_USER", "postgres")
 	dbPassword := getEnv("DB_PASSWORD", "")
-	dbName := getEnv("DB_NAME", "")
-	dbPort := getEnv("DB_PORT", "")
+	dbName := getEnv("DB_NAME", "postgres")
+	dbPort := getEnv("DB_PORT", "5432")
+	sslMode := getEnv("DB_SSLMODE", "disable") // “disable” for local, override to “require” in prod
 
-	// DSN for PostgreSQL connection
-	dsn := "host=" + dbHost +
-		" user=" + dbUser +
-		" password=" + dbPassword +
-		" dbname=" + dbName +
-		" port=" + dbPort +
-		" sslmode=require TimeZone=UTC"
+	// Build the DSN string
+	dsn := fmt.Sprintf(
+		"host=%s user=%s password=%s dbname=%s port=%s sslmode=%s TimeZone=UTC",
+		dbHost, dbUser, dbPassword, dbName, dbPort, sslMode,
+	)
 
-	var err error
-	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	// Open the connection
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		log.Fatalf("Could not connect to the database: %v", err)
 	}
 
-	// AutoMigrate creates or updates the "users" table based on the User model
+	// Run migrations
 	if err := db.AutoMigrate(&User{}); err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
 	}
-	log.Println("Database connected and migrated")
+
+	log.Println("✅ Database connected and migrated")
 }
 
 // signupHandler validates input and creates a new user in the database
@@ -433,12 +442,4 @@ func extractToken(authHeader string) (string, error) {
 		return "", errors.New("Authorization header format must be Bearer {token}")
 	}
 	return parts[1], nil
-}
-
-// getEnv returns the value of the environment variable if set, otherwise returns fallback.
-func getEnv(key, fallback string) string {
-	if value, exists := os.LookupEnv(key); exists {
-		return value
-	}
-	return fallback
 }
