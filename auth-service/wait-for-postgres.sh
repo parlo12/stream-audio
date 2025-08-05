@@ -12,7 +12,7 @@ sslmode="${DB_SSLMODE:-disable}"
 
 export PGPASSWORD="$password"
 
-echo "🔄 Waiting for Postgres at $host:$port (user: $user)..."
+echo "🔄 Waiting for Postgres at $host:$port (user: $user, sslmode=$sslmode)..."
 
 attempt=0
 while ! psql "host=$host port=$port user=$user dbname=$dbname sslmode=$sslmode sslrootcert=/certs/do-postgres-ca.crt" -c '\q' 2>/dev/null; do
