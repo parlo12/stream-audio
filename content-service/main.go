@@ -192,7 +192,7 @@ func setupDatabase() {
 	sslMode := getEnv("DB_SSLMODE", "disable") // “disable” for local, override to “require” in prod
 	// Build the DSN string
 	dsn := fmt.Sprintf(
-		"host=%s user=%s password=%s dbname=%s port=%s sslmode=%s TimeZone=UTC",
+		"host=%s user=%s password=%s dbname=%s port=%s sslmode=%s sslrootcert=/certs/do-postgres-ca.crt TimeZone=UTC",
 		dbHost, dbUser, dbPassword, dbName, dbPort, sslMode,
 	)
 
