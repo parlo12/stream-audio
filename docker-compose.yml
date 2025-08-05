@@ -69,8 +69,8 @@ services:
       DB_SSLMODE: "${DB_SSLMODE: -disable}"
 
       # enforce SSL
-      PGSSLMODE:      require
-      PGSSLROOTCERT:  /certs/do-postgres-ca.crt
+      #PGSSLMODE:      require
+      #PGSSLROOTCERT:  /certs/do-postgres-ca.crt
 
       # other vars:
       JWT_SECRET:     "${JWT_SECRET}"
@@ -100,8 +100,8 @@ services:
       DB_PASSWORD:    "${DB_PASSWORD}"
       # pass through your new flag:
       DB_SSLMODE: "${DB_SSLMODE: -disable}"
-      PGSSLMODE:      require
-      PGSSLROOTCERT:  /certs/do-postgres-ca.crt
+      # PGSSLMODE:      require
+      # PGSSLROOTCERT:  /certs/do-postgres-ca.crt
 
       # other vars:
       OPENAI_API_KEY:      "${OPENAI_API_KEY}"
