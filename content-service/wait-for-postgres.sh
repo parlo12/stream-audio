@@ -6,7 +6,7 @@ port="${DB_PORT:-5432}"
 user="${DB_USER}"
 password="${DB_PASSWORD}"
 dbname="${DB_NAME}"
-sslmode="${DB_SSLMODE:-require}"
+sslmode="${DB_SSLMODE:-disable}"
 
 export PGPASSWORD="$password"
 
