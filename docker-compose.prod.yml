@@ -1,0 +1,44 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: always
+    ports: ["6379:6379"]
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: auth-service/Dockerfile
+    restart: always
+    env_file: .env
+    environment:
+      GIN_MODE: "release"
+      DB_SSLMODE: "${DB_SSLMODE:-require}"
+      PGSSLMODE:  "${PGSSLMODE:-require}"
+    depends_on:
+      - redis
+    ports: ["8082:8082"]
+
+  content-service:
+    build:
+      context: .
+      dockerfile: content-service/Dockerfile
+    restart: always
+    env_file: .env
+    environment:
+      GIN_MODE: "release"
+      DB_SSLMODE: "${DB_SSLMODE:-require}"
+      PGSSLMODE:  "${PGSSLMODE:-require}"
+      AUTH_SERVICE_URL: "http://auth-service:8082"
+    depends_on:
+      - redis
+      - auth-service
+    ports: ["8083:8083"]
+    volumes:
+      - content-audio:/app/audio
+      - content-covers:/app/uploads/covers
+
+volumes:
+  content-audio:
+  content-covers:

@@ -117,7 +117,7 @@ func setupDatabase() {
 
 	// Build the DSN string
 	dsn := fmt.Sprintf(
-		"host=%s user=%s password=%s dbname=%s port=%s sslmode=%s sslrootcert=/certs/do-postgres-ca.crt TimeZone=UTC",
+		"host=%s user=%s password=%s dbname=%s port=%s sslmode=%s TimeZone=UTC",
 		dbHost, dbUser, dbPassword, dbName, dbPort, sslMode,
 	)
 
@@ -269,8 +269,8 @@ func createCheckoutSessionHandler(c *gin.Context) {
 				Quantity: stripe.Int64(1),
 			},
 		},
-		SuccessURL: stripe.String("https://content-service-9ncuf.ondigitalocean.app/thank-you-page"),
-		CancelURL:  stripe.String("https://content-service-9ncuf.ondigitalocean.app/cancel"),
+		SuccessURL: stripe.String("68.183.22.205/thank-you-page"),
+		CancelURL:  stripe.String("68.183.22.205/cancel"),
 	}
 	s, err := session.New(params)
 	if err != nil {

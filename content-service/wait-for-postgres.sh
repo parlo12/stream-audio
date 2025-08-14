@@ -9,25 +9,15 @@ dbname="${DB_NAME}"
 sslmode="${DB_SSLMODE:-disable}"
 
 export PGPASSWORD="$password"
-
 echo "🔄 Waiting for Postgres at $host:$port (user: $user, sslmode=$sslmode)..."
 
 attempt=0
-while true; do
-  if psql "host=$host port=$port user=$user dbname=$dbname sslmode=$sslmode sslrootcert/certs/do-postgres-ca.crt" -c '\q'; then
-    echo "✅ Postgres is ready. Starting service..."
-    break
-  else
-    attempt=$((attempt+1))
-    echo "Attempt $attempt: Postgres is unavailable - sleeping"
-    sleep 2
-  fi
+while ! psql "host=$host port=$port user=$user dbname=$dbname sslmode=$sslmode" -c '\q' 2>/dev/null; do
+  attempt=$((attempt+1))
+  echo "Attempt $attempt: Postgres is unavailable – sleeping"
+  sleep 2
 done
-
-# Debug: confirm what will be executed
-
-echo "🚀 Launching app: $@"
-echo "----------------------------------------"
-
+echo "✅ Postgres is ready. Starting service..."
 unset PGPASSWORD
+
 exec "$@"

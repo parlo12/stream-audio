@@ -1,0 +1,113 @@
+version: "3.9"
+
+services:
+# ──────────────── mqtt broker ────────────────
+  mqtt-broker:
+    image: eclipse-mosquitto:latest   # small footprint
+    restart: always
+    ports:
+      - "1883:1883"
+      - "8883:8883" 
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/certs:/mosquitto/config/certs:ro
+
+  # ──────────────── Postgres ────────────────
+  postgres:
+    image: postgres:13
+    restart: always
+    environment:
+      POSTGRES_USER:     "${POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_DB:       "${POSTGRES_DB}"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  # ──────────────── Redis (persistent) ────────────────
+  redis:
+    image: redis:alpine
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+  # ──────────────── Minio ────────────────
+  minio:
+    image: minio/minio:latest
+    restart: always
+    command: server /data
+    environment:
+      MINIO_ROOT_USER:     "${MINIO_ROOT_USER}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD}"
+    ports:
+      - "9000:9000"
+    volumes:
+      - minio-data:/data
+
+  # ──────────────── API Gateway ────────────────
+  gateway:
+    build: ./gateway
+    restart: always
+    ports:
+      - "8080:8080"
+    depends_on:
+      - auth-service
+
+  # ──────────────── Auth Service ────────────────
+  auth-service:
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "8082:8082"
+    depends_on:
+      - postgres
+      - redis
+    env_file:
+      - .env
+    environment:
+      JWT_SECRET:   "${JWT_SECRET}"
+      DB_HOST:      "postgres"
+      DB_USER:      "${POSTGRES_USER}"
+      DB_PASSWORD:  "${POSTGRES_PASSWORD}"
+      DB_NAME:      "${POSTGRES_DB}"
+      DB_PORT:      "5432"
+      REDIS_URL:    "redis://redis:6379"
+      GIN_MODE:     "release"
+
+  # ──────────────── Content Service ────────────────
+  content-service:
+    build: ./content-service
+    restart: always
+    ports:
+      - "8083:8083"
+    depends_on:
+      - postgres
+      - minio
+      - redis
+      - mqtt-broker
+    env_file:
+      - .env
+    environment:
+      OPENAI_API_KEY:      "${OPENAI_API_KEY}"
+      XI_API_KEY:          "${XI_API_KEY}"
+      ELEVENLABS_VOICE_ID: "${ELEVENLABS_VOICE_ID}"
+      JWT_SECRET:          "${JWT_SECRET}"
+      DB_HOST:             "postgres"
+      DB_USER:             "${POSTGRES_USER}"
+      DB_PASSWORD:         "${POSTGRES_PASSWORD}"
+      DB_NAME:             "${POSTGRES_DB}"
+      DB_PORT:             "5432"
+      RESPONSE_FORMAT:     "opus"
+      GIN_MODE:            "release"
+      # … your existing vars …
+      MQTT_BROKER: "tcp://mqtt-broker:1883"
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:

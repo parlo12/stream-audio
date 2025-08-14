@@ -1,30 +1,18 @@
-# syntax=docker/dockerfile:1
-FROM golang:1.24.2-alpine
-
-ENV GOPROXY=https://proxy.golang.org,direct
-
-# Install system dependencies: ffmpeg, git, postgres client for pg_isready
-RUN apk update && apk add --no-cache ffmpeg git postgresql-client
-
-WORKDIR /app
-
-# ✅ Step 1: Copy only mod files first and cache Go modules
-COPY go.mod .
-COPY go.sum .
+# ---- build ----
+FROM golang:1.22 as build
+WORKDIR /src
+COPY content-service/go.mod content-service/go.sum ./
 RUN go mod download
+COPY content-service/ ./
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/content-service
 
-# ✅ Step 2: Copy full source
-COPY . .
-
-# ✅ Step 3: Build the Go binary
-RUN go build -o content-service .
-
+# ---- runtime ----
+FROM gcr.io/distroless/base-debian12
+WORKDIR /app
+COPY --from=build /out/content-service /app/
+COPY content-service/wait-for-postgres.sh /app/wait-for-postgres.sh
+# audio & uploads directories the app serves from:
+RUN mkdir -p /app/audio /app/uploads/covers
+VOLUME ["/app/audio", "/app/uploads/covers"]
 EXPOSE 8083
-
-# ✅ Step 4: Copy startup wait script and make it executable
-COPY wait-for-postgres.sh .
-RUN chmod +x wait-for-postgres.sh
-
-# ✅ Step 5: Entrypoint and command
-ENTRYPOINT ["./wait-for-postgres.sh"]
-CMD ["./content-service"]
+ENTRYPOINT ["/app/wait-for-postgres.sh", "/app/content-service"]

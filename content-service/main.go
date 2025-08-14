@@ -192,7 +192,7 @@ func setupDatabase() {
 	sslMode := getEnv("DB_SSLMODE", "disable") // “disable” for local, override to “require” in prod
 	// Build the DSN string
 	dsn := fmt.Sprintf(
-		"host=%s user=%s password=%s dbname=%s port=%s sslmode=%s sslrootcert=/certs/do-postgres-ca.crt TimeZone=UTC",
+		"host=%s user=%s password=%s dbname=%s port=%s sslmode=%s TimeZone=UTC",
 		dbHost, dbUser, dbPassword, dbName, dbPort, sslMode,
 	)
 
@@ -486,7 +486,7 @@ func authMiddleware() gin.HandlerFunc {
 // adding helper function to get user account type
 
 func getUserAccountType(token string) (string, error) {
-	authServiceURL := getEnv("AUTH_SERVICE_URL", "http//content-service:8083")
+	authServiceURL := getEnv("AUTH_SERVICE_URL", "http//auth-service:8082")
 
 	req, err := http.NewRequest("GET", authServiceURL+"/user/account-type", nil)
 	if err != nil {
