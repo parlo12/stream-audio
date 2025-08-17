@@ -106,7 +106,7 @@ func main() {
 	// Set up the database connection and run migrations.
 	setupDatabase()
 	// MQTT initialization
-	InitMQTT()
+	go InitMQTT()
 	//Initializaton for TTS worker
 	go startTTSWorker()
 

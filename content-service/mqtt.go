@@ -61,11 +61,23 @@ func InitMQTT() {
 
 	mqttClient = mqtt.NewClient(opts)
 	token := mqttClient.Connect()
-	token.Wait()
-	if err := token.Error(); err != nil {
-		// log.Fatalf("❌ MQTT connection error: %v", err)
-		log.Printf("⚠️ MQTT connect failed: %v (broker=%s). Continuing without MQTT.", err, broker)
+	// token.Wait() 					making mqtt non blocking
+	// if err := token.Error(); err != nil {
+	// log.Fatalf("❌ MQTT connection error: %v", err)
+	// log.Printf("⚠️ MQTT connect failed: %v (broker=%s). Continuing without MQTT.", err, broker)
+	// return
+	// }
+	// log.Println("✅ MQTT connected to broker at", broker)
+
+	// Don’t block main forever. Give it a few seconds and move on
+	if !token.WaitTimeout(5 * time.Second) {
+		log.Printf("⚠️ MQTT connect timed out after 5s (broker=%s). Continuing without blocking.", broker)
+		  // OnConnect callback will log success later if/when it connects
 		return
+	}
+
+	if err := token.Error(); err != nil {
+		log.Printf("⚠️ MQTT connect failed: %v (broker=%s). Continuing without MQTT.", err, broker)
 	}
 	log.Println("✅ MQTT connected to broker at", broker)
 }
