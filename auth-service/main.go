@@ -117,7 +117,7 @@ func setupDatabase() {
 	dbPassword := getEnv("DB_PASSWORD", "")
 	dbName := getEnv("DB_NAME", "postgres")
 	dbPort := getEnv("DB_PORT", "5432")
-	sslMode := getEnv("DB_SSLMODE") // “disable” for local, override to “require” in prod
+	sslMode := getEnv("DB_SSLMODE", "") // “disable” for local, override to “require” in prod
 
 	// Build the DSN string
 	// I got a security flaw here this needs to be mask
