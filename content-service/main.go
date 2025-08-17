@@ -340,7 +340,7 @@ func listBookPagesHandler(c *gin.Context) {
 			"status":  chunk.TTSStatus,
 			// "audio_url": chunk.AudioPath,
 			"audio_url": fmt.Sprintf("%s/user/books/%d/pages/%d/audio",
-				getEnv("STREAM_HOST", "http://0.0.0.0:8083"), chunk.BookID, chunk.Index),
+				getEnv("STREAM_HOST", ""), chunk.BookID, chunk.Index), // use in local http://0.0.0.0:8083
 		})
 	}
 
@@ -410,7 +410,7 @@ func listBooksHandler(c *gin.Context) {
 	}
 
 	//🛡 Add public stream URL to each book
-	streamHost := getEnv("STREAM_HOST", "http://100.110.176.220:8083")
+	streamHost := getEnv("STREAM_HOST", "") // use locally http://100.110.176.220:8083
 	if streamHost == "" {
 		log.Println("STREAM_HOST environment variable not set, using default http://100.110.176.220:8083")
 		streamHost = "http://100.110.176.220:8083"
@@ -671,7 +671,7 @@ func getSingleBookHandler(c *gin.Context) {
 		Status:      book.Status,
 	}
 
-	streamHost := getEnv("STREAM_HOST", "http://100.110.176.220:8083")
+	streamHost := getEnv("STREAM_HOST", "") // use locally http://100.110.176.220:8083
 	if streamHost == "" {
 		streamHost = "http://100.110.176.220:8083"
 	}
