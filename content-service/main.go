@@ -191,6 +191,7 @@ func setupDatabase() {
 	dbPort := getEnv("DB_PORT", "")
 	sslMode := getEnv("DB_SSLMODE", "disable") // “disable” for local, override to “require” in prod
 	// Build the DSN string
+	// security flow here using function to mask db password ReplaceAll(dsn, dbPassword, "********")
 	dsn := fmt.Sprintf(
 		"host=%s user=%s password=%s dbname=%s port=%s sslmode=%s TimeZone=UTC",
 		dbHost, dbUser, dbPassword, dbName, dbPort, sslMode,

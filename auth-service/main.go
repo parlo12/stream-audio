@@ -68,6 +68,10 @@ func main() {
 
 	router := gin.Default()
 
+	router.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
 	// Endpoints for signup and login
 	router.POST("/signup", signupHandler)
 	router.POST("/login", loginHandler)
@@ -113,9 +117,11 @@ func setupDatabase() {
 	dbPassword := getEnv("DB_PASSWORD", "")
 	dbName := getEnv("DB_NAME", "postgres")
 	dbPort := getEnv("DB_PORT", "5432")
-	sslMode := getEnv("DB_SSLMODE", "disable") // “disable” for local, override to “require” in prod
+	sslMode := getEnv("DB_SSLMODE") // “disable” for local, override to “require” in prod
 
 	// Build the DSN string
+	// I got a security flaw here this needs to be mask
+	// mask := string.ReplaceAll(dsn, dbPassword, "********")
 	dsn := fmt.Sprintf(
 		"host=%s user=%s password=%s dbname=%s port=%s sslmode=%s TimeZone=UTC",
 		dbHost, dbUser, dbPassword, dbName, dbPort, sslMode,
@@ -123,8 +129,9 @@ func setupDatabase() {
 
 	log.Printf("🔍 DSN=%q\n", dsn)
 
+	var err error
 	// Open the connection
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		log.Fatalf("Could not connect to the database: %v", err)
 	}
