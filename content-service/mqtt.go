@@ -20,8 +20,11 @@ func InitMQTT() {
 	// Use tcp:// for your VPC broker (no TLS). You’ll override this via env anyway.
 	// Example .env: MQTT_BROKER=tcp://10.116.0.8:1883
 	broker := getEnv("MQTT_BROKER", "tcp://mqtt-broker:1883")
+	if broker == "" {
+		log.Println("⚠️ MQTT_BROKER not set; starting without MQTT")
+		return
+	}
 	clientID := fmt.Sprintf("svc-content-%d", time.Now().UnixNano())
-
 	opts := mqtt.NewClientOptions().
 		AddBroker(broker).
 		SetClientID(clientID).
@@ -60,8 +63,11 @@ func InitMQTT() {
 	token := mqttClient.Connect()
 	token.Wait()
 	if err := token.Error(); err != nil {
-		log.Fatalf("❌ MQTT connection error: %v", err)
+		// log.Fatalf("❌ MQTT connection error: %v", err)
+		log.Printf("⚠️ MQTT connect failed: %v (broker=%s). Continuing without MQTT.", err, broker)
+		return
 	}
+	log.Println("✅ MQTT connected to broker at", broker)
 }
 
 // PublishEvent publishes a JSON payload to the specified MQTT topic.

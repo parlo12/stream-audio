@@ -127,4 +127,4 @@ services:
 
 volumes:
   redis-data:
-  minio-data:
+  minio-dataz:
