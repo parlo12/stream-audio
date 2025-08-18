@@ -72,21 +72,37 @@ func InitMQTT() {
 	// Don’t block main forever. Give it a few seconds and move on
 	if !token.WaitTimeout(5 * time.Second) {
 		log.Printf("⚠️ MQTT connect timed out after 5s (broker=%s). Continuing without blocking.", broker)
-		  // OnConnect callback will log success later if/when it connects
+		// OnConnect callback will log success later if/when it connects
 		return
 	}
 
 	if err := token.Error(); err != nil {
 		log.Printf("⚠️ MQTT connect failed: %v (broker=%s). Continuing without MQTT.", err, broker)
 	}
-	log.Println("✅ MQTT connected to broker at", broker)
+	// log.Println("✅ MQTT connected to broker at", broker)
 }
 
 // PublishEvent publishes a JSON payload to the specified MQTT topic.
+//
+//	func PublishEvent(topic string, payload []byte) {
+//		tok := mqttClient.Publish(topic, 1, false, payload)
+//		tok.WaitTimeout(5 * time.Second)
+//		if err := tok.Error(); err != nil {
+//			log.Printf("⚠️ MQTT publish to %s failed: %v", topic, err)
+//		}
+//	}
+
+/*
+Guard publishes (don’t try to publish if disconnecte
+This avoids noisy errors if the broker ever restarts.
+*/
 func PublishEvent(topic string, payload []byte) {
+	if mqttClient == nil || !mqttClient.IsConnectionOpen() { // or IsConnected() if your version prefers it
+		log.Printf("⚠️ MQTT not connected; skipping publish to %s", topic)
+		return
+	}
 	tok := mqttClient.Publish(topic, 1, false, payload)
-	tok.WaitTimeout(5 * time.Second)
-	if err := tok.Error(); err != nil {
-		log.Printf("⚠️ MQTT publish to %s failed: %v", topic, err)
+	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
+		log.Printf("⚠️ MQTT publish to %s failed: %v", topic, tok.Error())
 	}
 }

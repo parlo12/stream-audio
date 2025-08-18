@@ -118,6 +118,12 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"message": "Auth service is running at https://68.183.22.205:8083/health"})
 	})
 
+	// Insanaty check for MQTT
+	router.GET("/debug/mqtt", func(c *gin.Context) {
+		PublishEvent("debug/ping", []byte("hi from content-service file"))
+		c.JSON(200, gin.H{"ok": true})
+	})
+
 	// ✅ Serve static audio files from ./audio
 	router.Static("/audio", "./audio")
 
