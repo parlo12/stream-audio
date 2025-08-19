@@ -174,6 +174,10 @@ func main() {
 
 	}
 
+	for _, r := range router.Routes() {
+		log.Printf("→ %s %s", r.Method, r.Path)
+	}
+
 	// Use PORT env var if set; default to 8083.
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -493,7 +497,7 @@ func authMiddleware() gin.HandlerFunc {
 // adding helper function to get user account type
 
 func getUserAccountType(token string) (string, error) {
-	authServiceURL := getEnv("AUTH_SERVICE_URL", "http//auth-service:8082")
+	authServiceURL := getEnv("AUTH_SERVICE_URL", "http://auth-service:8082")
 
 	req, err := http.NewRequest("GET", authServiceURL+"/user/account-type", nil)
 	if err != nil {
