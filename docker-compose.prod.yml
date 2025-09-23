@@ -1,11 +1,87 @@
+# Enhanced docker-compose.prod.yml - Complete Stream Audio Stack
 version: "3.9"
 
 services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_DB: ${DB_NAME:-streamaudio}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./logs/postgres:/var/log/postgresql
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-streamaudio}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
   redis:
     image: redis:7-alpine
     restart: always
     ports: ["6379:6379"]
+    volumes:
+      - redis_data:/data
+      - ./logs/redis:/var/log/redis
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 
+  # Gateway Service (HTTP Router)
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    restart: always
+    env_file: .env
+    environment:
+      GIN_MODE: "release"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      AUTH_SERVICE_URL: "http://auth-service:8082"
+      CONTENT_SERVICE_URL: "http://content-service:8083"
+      CORS_ORIGINS: "${CORS_ORIGINS:-*}"
+      PORT: "8080"
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      content-service:
+        condition: service_healthy
+    ports: 
+      - "80:8080"      # Main HTTP port for external access
+    volumes:
+      - ./logs/gateway:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Authentication Service
   auth-service:
     build:
       context: .
@@ -15,11 +91,32 @@ services:
     environment:
       GIN_MODE: "release"
       DB_SSLMODE: "${DB_SSLMODE:-require}"
-      PGSSLMODE:  "${PGSSLMODE:-require}"
+      PGSSLMODE: "${PGSSLMODE:-require}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      DB_HOST: "postgres"
+      DB_PORT: "5432"
+      REDIS_URL: "redis://redis:6379"
     depends_on:
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     ports: ["8082:8082"]
+    volumes:
+      - ./logs/auth:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8082/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
+  # Content Service (Audio Processing + PDF + MQTT + WebSocket)
   content-service:
     build:
       context: .
@@ -29,16 +126,92 @@ services:
     environment:
       GIN_MODE: "release"
       DB_SSLMODE: "${DB_SSLMODE:-require}"
-      PGSSLMODE:  "${PGSSLMODE:-require}"
+      PGSSLMODE: "${PGSSLMODE:-require}"
       AUTH_SERVICE_URL: "http://auth-service:8082"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      AUDIO_STORAGE_PATH: "/app/audio"
+      DB_HOST: "postgres"
+      DB_PORT: "5432"
+      REDIS_URL: "redis://redis:6379"
+      # MQTT configuration for content service
+      MQTT_BROKER_HOST: "${MQTT_BROKER_HOST:-host.docker.internal}"
+      MQTT_BROKER_PORT: "${MQTT_BROKER_PORT:-1883}"
+      MQTT_USERNAME: "${MQTT_USERNAME}"
+      MQTT_PASSWORD: "${MQTT_PASSWORD}"
+      # File processing limits
+      MAX_FILE_SIZE: "${MAX_FILE_SIZE:-50MB}"
+      UPLOAD_PATH: "/app/uploads"
     depends_on:
-      - redis
-      - auth-service
-    ports: ["8083:8083"]
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+    ports: 
+      - "8083:8083"    # HTTP API port
+      - "8084:8084"    # WebSocket port for audio streaming
     volumes:
-      - content-audio:/app/audio
-      - content-covers:/app/uploads/covers
+      - content-audio-persistent:/app/audio         # Persistent audio storage
+      - content-covers-persistent:/app/uploads/covers  # Persistent cover storage
+      - content-uploads:/app/uploads               # PDF and document uploads
+      - ./logs/content:/app/logs
+    # Allow access to host network for MQTT connection
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8083/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
 volumes:
+  # Database persistence
+  postgres_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/stream-audio-data/postgres
+
+  # Redis persistence
+  redis_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/stream-audio-data/redis
+
+  # Your existing volumes (for backward compatibility)
   content-audio:
   content-covers:
+  
+  # New persistent volumes that survive container recreation
+  content-audio-persistent:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/stream-audio-data/audio
+  content-covers-persistent:
+    driver: local  
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/stream-audio-data/covers
+  content-uploads:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/stream-audio-data/uploads
+
+networks:
+  default:
+    name: stream-audio-network

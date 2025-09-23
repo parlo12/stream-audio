@@ -1,130 +1,106 @@
+# Enhanced docker-compose.prod.yml with persistent storage
 version: "3.9"
 
 services:
-
-# -- Posgres-----------------------------------------
-  postgres:
-    image: postgres:13
-    restart: always
-    environment:
-      POSTGRES_USER:     "${POSTGRES_USER}"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
-      POSTGRES_DB:       "${POSTGRES_DB}"
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-  # ── MQTT Broker ─────────────────────────────────
-  mqtt-broker:
-    image: eclipse-mosquitto:latest
-    restart: always
-    ports:
-      - "1883:1883"
-      - "8883:8883"
-    volumes:
-      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-      - ./mosquitto/certs:/mosquitto/config/certs:ro
-
-  # ── Redis ────────────────────────────────────────
   redis:
-    image: redis:alpine
+    image: redis:7-alpine
     restart: always
-    ports:
-      - "6379:6379"
+    ports: ["6379:6379"]
     volumes:
-      - redis-data:/data
+      - redis_data:/data
+      - ./logs/redis:/var/log/redis
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-  # ── MinIO ────────────────────────────────────────
-  minio:
-    image: minio/minio:latest
-    restart: always
-    command: server /data
-    environment:
-      MINIO_ROOT_USER:     "${MINIO_ROOT_USER}"
-      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD}"
-    ports:
-      - "9000:9000"
-    volumes:
-      - minio-data:/data
-
-  # ── API Gateway ──────────────────────────────────
-  gateway:
-    build: ./gateway
-    restart: always
-    ports:
-      - "8080:8080"
-    depends_on:
-      - auth-service
-
-  # ── Auth Service ────────────────────────────────
   auth-service:
     build:
-      context: ./auth-service
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: auth-service/Dockerfile
     restart: always
-    ports:
-      - "8082:8082"
-    depends_on:
-      - postgres
-      - redis
-    env_file:
-      - .env
-    volumes:
-      # mount DO’s CA so lib/pq & psql can verify SSL
-      - ./certs/do-postgres-ca.crt:/certs/do-postgres-ca.crt:ro
+    env_file: .env
     environment:
-      # database (managed DO cluster) settings:
-      DB_HOST:        "${DB_HOST}"
-      DB_PORT:        "${DB_PORT}"
-      DB_NAME:        "${DB_NAME}"
-      DB_USER:        "${DB_USER}"
-      DB_PASSWORD:    "${DB_PASSWORD}"
-      # pass through your new flag:
-      DB_SSLMODE:     "disable"
-      PGSSLMODE:      "disable"
-      # enforce SSL
-      
-      # other vars:
-      JWT_SECRET:     "${JWT_SECRET}"
-      REDIS_URL:      "redis://redis:6379"
-      GIN_MODE:       "release"
+      GIN_MODE: "release"
+      DB_SSLMODE: "${DB_SSLMODE:-require}"
+      PGSSLMODE: "${PGSSLMODE:-require}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    depends_on:
+      - redis
+    ports: ["8082:8082"]
+    volumes:
+      - ./logs/auth:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8082/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  # ── Content Service ─────────────────────────────
   content-service:
-    build: ./content-service
+    build:
+      context: .
+      dockerfile: content-service/Dockerfile
     restart: always
-    ports:
-      - "8083:8083"
-    depends_on:
-      - postgres
-      - redis
-      - minio
-      - mqtt-broker
-    env_file:
-      - .env
-    volumes:
-      - ./certs/do-postgres-ca.crt:/certs/do-postgres-ca.crt:ro
+    env_file: .env
     environment:
-      # database (managed DO cluster) settings:
-      DB_HOST:        "${DB_HOST}"
-      DB_PORT:        "${DB_PORT}"
-      DB_NAME:        "${DB_NAME}"
-      DB_USER:        "${DB_USER}"
-      DB_PASSWORD:    "${DB_PASSWORD}"
-      # pass through your new flag:
-      DB_SSLMODE:     "disable"
-      PGSSLMODE:      "disable"
-      # PGSSLROOTCERT:  /certs/do-postgres-ca.crt
-
-      # other vars:
-      OPENAI_API_KEY:      "${OPENAI_API_KEY}"
-      XI_API_KEY:          "${XI_API_KEY}"
-      ELEVENLABS_VOICE_ID: "${ELEVENLABS_VOICE_ID}"
-      JWT_SECRET:          "${JWT_SECRET}"
-      RESPONSE_FORMAT:     "opus"
-      GIN_MODE:            "release"
-      MQTT_BROKER:         "tcp://mqtt-broker:1883"
+      GIN_MODE: "release"
+      DB_SSLMODE: "${DB_SSLMODE:-require}"
+      PGSSLMODE: "${PGSSLMODE:-require}"
+      AUTH_SERVICE_URL: "http://auth-service:8082"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      AUDIO_STORAGE_PATH: "/app/audio"
+    depends_on:
+      - redis
+      - auth-service
+    ports: ["8083:8083"]
+    volumes:
+      - content-audio-persistent:/app/audio  # Enhanced persistent storage
+      - content-covers-persistent:/app/uploads/covers  # Enhanced persistent storage
+      - ./logs/content:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8083/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
 volumes:
-  redis-data:
-  minio-dataz:
+ 
+  content-audio:
+   
+  content-covers:
+
+  
+  # New persistent volumes that survive container recreation
+  content-audio-persistent:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/stream-audio-data/audio
+  content-covers-persistent:
+    driver: local  
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/stream-audio-data/covers
+  redis_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/stream-audio-data/redis
+
+networks:
+  default:
+    name: stream-audio-network
