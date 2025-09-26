@@ -1,5 +1,5 @@
 # ---- build ----
-FROM golang:1.22 as build
+FROM golang:1.23 as build
 WORKDIR /src
 COPY content-service/go.mod content-service/go.sum ./
 RUN go mod download
