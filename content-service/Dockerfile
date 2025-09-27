@@ -10,9 +10,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/content-service
 FROM debian:12-slim
 WORKDIR /app
 
-# Install FFmpeg and other dependencies
+# Install FFmpeg, PostgreSQL client, and other dependencies
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    postgresql-client \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
