@@ -4,8 +4,11 @@ import (
 	"archive/zip"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"rsc.io/pdf"
@@ -41,15 +44,20 @@ func ChunkDocument(bookID uint, filePath string) (int, error) {
 }
 
 func ExtractTextByType(path string) (string, error) {
+	lowerPath := strings.ToLower(path)
 	switch {
-	case strings.HasSuffix(strings.ToLower(path), ".pdf"):
+	case strings.HasSuffix(lowerPath, ".pdf"):
 		return ExtractTextFromPDF(path)
-	case strings.HasSuffix(strings.ToLower(path), ".txt"):
+	case strings.HasSuffix(lowerPath, ".txt"):
 		return ExtractTextFromTXT(path)
-	case strings.HasSuffix(strings.ToLower(path), ".epub"):
+	case strings.HasSuffix(lowerPath, ".epub"):
 		return ExtractTextFromEPUB(path)
+	case strings.HasSuffix(lowerPath, ".azw") || strings.HasSuffix(lowerPath, ".mobi") || strings.HasSuffix(lowerPath, ".azw3"):
+		return ExtractTextFromMOBI(path)
+	case strings.HasSuffix(lowerPath, ".kfx"):
+		return "", errors.New("KFX format is not supported. Please convert to EPUB, PDF, MOBI, or AZW3 format first")
 	default:
-		return "", errors.New("unsupported file type")
+		return "", errors.New("unsupported file type. Supported formats: PDF, TXT, EPUB, MOBI, AZW, AZW3")
 	}
 }
 
@@ -123,4 +131,44 @@ func ExtractTextFromEPUB(path string) (string, error) {
 	}
 
 	return sb.String(), nil
+}
+
+// ExtractTextFromMOBI extracts text from MOBI, AZW, and AZW3 files
+// This function uses Calibre's ebook-convert command-line tool
+func ExtractTextFromMOBI(path string) (string, error) {
+	// Check if ebook-convert is available
+	_, err := exec.LookPath("ebook-convert")
+	if err != nil {
+		return "", fmt.Errorf("ebook-convert (Calibre) not found. Please install Calibre to support MOBI/AZW formats. Error: %w", err)
+	}
+
+	// Create a temporary file for the converted text
+	tempDir := os.TempDir()
+	tempTxtFile := filepath.Join(tempDir, fmt.Sprintf("mobi_temp_%s.txt", filepath.Base(path)))
+	defer os.Remove(tempTxtFile) // Clean up temp file
+
+	// Run ebook-convert to convert MOBI to TXT
+	cmd := exec.Command("ebook-convert", path, tempTxtFile, "--txt-output-encoding=utf-8")
+
+	// Capture any errors from the conversion
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf("failed to convert MOBI file: %w. Details: %s", err, stderr.String())
+	}
+
+	// Read the converted text file
+	textData, err := os.ReadFile(tempTxtFile)
+	if err != nil {
+		return "", fmt.Errorf("failed to read converted text file: %w", err)
+	}
+
+	text := string(textData)
+	if len(text) == 0 {
+		return "", errors.New("no text content extracted from MOBI file")
+	}
+
+	return text, nil
 }

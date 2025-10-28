@@ -1,5 +1,5 @@
 # ---- build ----
-FROM golang:1.23 as build
+FROM golang:1.24 as build
 WORKDIR /src
 COPY content-service/go.mod content-service/go.sum ./
 RUN go mod download
@@ -10,11 +10,12 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/content-service
 FROM debian:12-slim
 WORKDIR /app
 
-# Install FFmpeg, PostgreSQL client, and other dependencies
+# Install FFmpeg, PostgreSQL client, Calibre (for ebook-convert), and other dependencies
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     postgresql-client \
     ca-certificates \
+    calibre \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/content-service /app/

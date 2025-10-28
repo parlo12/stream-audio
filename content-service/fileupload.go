@@ -35,9 +35,31 @@ func uploadBookFileHandler(c *gin.Context) {
 	}
 
 	// Validate file type
-	if !strings.HasSuffix(strings.ToLower(file.Filename), ".pdf") &&
-		!strings.HasSuffix(strings.ToLower(file.Filename), ".txt") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file type. Only PDF and TXT files are allowed."})
+	lowerFilename := strings.ToLower(file.Filename)
+	validExtensions := []string{".pdf", ".txt", ".epub", ".mobi", ".azw", ".azw3"}
+	isValid := false
+	for _, ext := range validExtensions {
+		if strings.HasSuffix(lowerFilename, ext) {
+			isValid = true
+			break
+		}
+	}
+
+	if !isValid {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid file type. Supported formats: PDF, TXT, EPUB, MOBI, AZW, AZW3",
+			"note":  "KFX format is not supported. Please convert to one of the supported formats first.",
+		})
+		return
+	}
+
+	// Check for unsupported KFX format explicitly
+	if strings.HasSuffix(lowerFilename, ".kfx") {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "KFX format is not supported",
+			"message": "Please convert your KFX file to EPUB, PDF, MOBI, or AZW3 format first",
+			"suggestion": "You can use Calibre or online converters to convert KFX files",
+		})
 		return
 	}
 
