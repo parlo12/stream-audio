@@ -137,14 +137,32 @@ Return ONLY the direct image URL on a single line. Do not include any explanatio
 		return "", fmt.Errorf("OpenAI API error (status %d): %s", resp.StatusCode, string(body))
 	}
 
+	// Read response body for debugging
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	// Log raw response for debugging (first 500 chars)
+	if len(bodyBytes) > 500 {
+		log.Printf("OpenAI Response (truncated): %s...", string(bodyBytes[:500]))
+	} else {
+		log.Printf("OpenAI Response: %s", string(bodyBytes))
+	}
+
 	var apiResponse ResponsesAPIResponse
-	if err := json.NewDecoder(resp.Body).Decode(&apiResponse); err != nil {
+	if err := json.Unmarshal(bodyBytes, &apiResponse); err != nil {
 		return "", fmt.Errorf("failed to decode response: %w", err)
 	}
 
 	// Extract the image URL from the response
 	imageURL := extractImageURLFromResponse(&apiResponse)
 	if imageURL == "" {
+		// Log the response structure for debugging
+		log.Printf("⚠️ Could not extract URL from response. Output items count: %d", len(apiResponse.Output))
+		if len(apiResponse.Output) > 0 {
+			log.Printf("First output item type: %s", apiResponse.Output[0].Type)
+		}
 		return "", fmt.Errorf("no valid image URL found in response")
 	}
 
@@ -152,47 +170,19 @@ Return ONLY the direct image URL on a single line. Do not include any explanatio
 	return imageURL, nil
 }
 
-// extractImageURLFromResponse parses the OpenAI Responses API output to find the image URL
-func extractImageURLFromResponse(response *ResponsesAPIResponse) string {
-	// First, try to extract from output_text (simplest case)
-	if response.OutputText != "" {
-		url := extractURLFromText(response.OutputText)
-		if url != "" {
-			return url
+// isImageURL checks if a URL points to an image
+func isImageURL(url string) bool {
+	urlLower := ""
+	for i := 0; i < len(url); i++ {
+		c := url[i]
+		if c >= 'A' && c <= 'Z' {
+			urlLower += string(c + 32) // Convert to lowercase
+		} else {
+			urlLower += string(c)
 		}
 	}
 
-	// Otherwise, parse the output items
-	for _, item := range response.Output {
-		if item.Type == "message" && len(item.Content) > 0 {
-			for _, content := range item.Content {
-				if content.Type == "output_text" && content.Text != "" {
-					url := extractURLFromText(content.Text)
-					if url != "" {
-						return url
-					}
-				}
-			}
-		}
-	}
-
-	return ""
-}
-
-// extractURLFromText extracts a valid image URL from text
-func extractURLFromText(text string) string {
-	// Simple validation: check if text contains a URL pattern
-	// Look for URLs ending in common image extensions
-	if len(text) > 10 &&
-	   (len(text) < 500) && // Reasonable URL length
-	   (containsAny(text, []string{".jpg", ".jpeg", ".png"})) &&
-	   (containsAny(text, []string{"http://", "https://"})) {
-
-		// Clean up the URL (remove any markdown, whitespace, etc.)
-		cleaned := cleanURL(text)
-		return cleaned
-	}
-	return ""
+	return containsAny(urlLower, []string{".jpg", ".jpeg", ".png", ".webp", ".gif"})
 }
 
 // containsAny checks if the string contains any of the given substrings
@@ -248,6 +238,89 @@ func cleanURL(url string) string {
 	}
 
 	return cleaned
+}
+
+// extractURLFromText extracts a valid image URL from text
+func extractURLFromText(text string) string {
+	// Try to find URLs in the text using simple pattern matching
+	// Look for http:// or https:// followed by characters until whitespace
+
+	httpIndex := -1
+	for i := 0; i < len(text)-7; i++ {
+		if text[i:i+7] == "http://" || (i < len(text)-8 && text[i:i+8] == "https://") {
+			httpIndex = i
+			break
+		}
+	}
+
+	if httpIndex == -1 {
+		return ""
+	}
+
+	// Find the end of the URL (whitespace, newline, or end of string)
+	endIndex := len(text)
+	for i := httpIndex; i < len(text); i++ {
+		c := text[i]
+		if c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == ')' || c == ']' {
+			endIndex = i
+			break
+		}
+	}
+
+	url := text[httpIndex:endIndex]
+
+	// Validate it's an image URL
+	if isImageURL(url) {
+		return cleanURL(url)
+	}
+
+	return ""
+}
+
+// extractImageURLFromResponse parses the OpenAI Responses API output to find the image URL
+func extractImageURLFromResponse(response *ResponsesAPIResponse) string {
+	// First, try to extract from output_text (simplest case)
+	if response.OutputText != "" {
+		url := extractURLFromText(response.OutputText)
+		if url != "" {
+			return url
+		}
+	}
+
+	// Otherwise, parse the output items
+	for _, item := range response.Output {
+		if item.Type == "message" && len(item.Content) > 0 {
+			for _, content := range item.Content {
+				if content.Type == "output_text" && content.Text != "" {
+					url := extractURLFromText(content.Text)
+					if url != "" {
+						return url
+					}
+				}
+
+				// Also check annotations for URLs
+				for _, annotation := range content.Annotations {
+					if annotation.Type == "url_citation" && annotation.URL != "" {
+						// Check if this URL is an image
+						if isImageURL(annotation.URL) {
+							return annotation.URL
+						}
+					}
+				}
+			}
+		}
+
+		// Check sources from web_search_call actions
+		if item.Type == "web_search_call" && item.Action != nil {
+			for _, source := range item.Action.Sources {
+				if source.URL != "" && isImageURL(source.URL) {
+					return source.URL
+				}
+			}
+		}
+	}
+
+	return ""
 }
 
 // downloadAndSaveImage downloads an image from a URL and saves it to the local filesystem
