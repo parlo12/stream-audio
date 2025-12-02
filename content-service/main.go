@@ -264,7 +264,42 @@ func createBookHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save book", "details": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "Book saved", "book": book})
+
+	// Automatically fetch book cover from the web using OpenAI web search
+	go func(b Book) {
+		log.Printf("🔍 Fetching book cover for '%s' by %s...", b.Title, b.Author)
+
+		localPath, publicURL, err := fetchAndSaveBookCover(b.Title, b.Author, fmt.Sprintf("%d", b.ID))
+		if err != nil {
+			log.Printf("⚠️ Failed to fetch book cover for book ID %d: %v", b.ID, err)
+			// Don't fail the book creation, just log the error
+			return
+		}
+
+		// Update the book record with cover information
+		if err := db.Model(&Book{}).Where("id = ?", b.ID).Updates(map[string]interface{}{
+			"CoverPath": localPath,
+			"CoverURL":  publicURL,
+		}).Error; err != nil {
+			log.Printf("⚠️ Failed to update book cover for book ID %d: %v", b.ID, err)
+			return
+		}
+
+		// Publish MQTT event
+		payload := map[string]interface{}{
+			"book_id":   b.ID,
+			"cover_url": publicURL,
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+			"source":    "web_search",
+		}
+		data, _ := json.Marshal(payload)
+		topic := fmt.Sprintf("users/%d/cover_uploaded", b.UserID)
+		PublishEvent(topic, data)
+
+		log.Printf("✅ Book cover automatically fetched and saved for book ID %d", b.ID)
+	}(book)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Book saved, cover fetching in progress", "book": book})
 }
 
 // deleteBookHandler deletes a book by its ID or title.
