@@ -51,15 +51,19 @@ func SearchBooksHandler(c *gin.Context) {
 
 	log.Printf("🔍 Searching for books: %s", req.Query)
 
-	// 3. Search for books using OpenAI
+	// 3. Search for books using OpenAI (try Responses API first, fallback to Chat)
 	results, err := searchBooksWithOpenAI(req.Query)
-	if err != nil {
-		log.Printf("❌ Failed to search books: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to search books", "details": err.Error()})
-		return
+	if err != nil || len(results) == 0 {
+		log.Printf("⚠️ Responses API failed or returned no results, trying Chat API: %v", err)
+		results, err = searchBooksWithChatCompletion(req.Query)
+		if err != nil {
+			log.Printf("❌ Both APIs failed to search books: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to search books", "details": err.Error()})
+			return
+		}
 	}
 
-	// 4. Return results
+	// 4. Return results (even if empty array)
 	log.Printf("✅ Found %d book results for query: %s", len(results), req.Query)
 	c.JSON(http.StatusOK, SearchBooksResponse{Results: results})
 }
@@ -253,27 +257,37 @@ func searchBooksWithChatCompletion(query string) ([]BookSuggestion, error) {
 		return nil, errors.New("OPENAI_API_KEY not set")
 	}
 
-	systemPrompt := `You are a book search assistant. When given a book search query, you search for matching books and return a JSON array of results.
+	systemPrompt := `You are a book discovery assistant with access to book information. When given a book title or author name, return detailed information about matching books.
 
-Each result should include:
-- title: Full book title
+IMPORTANT: You must provide real book cover URLs from these sources:
+- Amazon book covers
+- Goodreads book covers
+- Open Library covers (https://covers.openlibrary.org/)
+- Publisher websites
+
+Each result must include:
+- title: Full official book title
 - author: Author's full name
-- cover_url: Direct URL to book cover image (preferably from Amazon, Goodreads, or OpenLibrary)
-- summary: Engaging 1-2 sentence summary
+- cover_url: Direct image URL (must end in .jpg, .jpeg, or .png)
+- summary: Compelling 1-2 sentence description
 
-Return ONLY the JSON array, no markdown formatting, no explanations.`
+Return ONLY a valid JSON array with no markdown formatting, code blocks, or explanations.`
 
-	userPrompt := fmt.Sprintf(`Find up to 5 books matching: "%s"
+	userPrompt := fmt.Sprintf(`Search for books related to: "%s"
 
-Return as JSON array:
+Provide up to 5 book matches with complete information. Use real book cover URLs from Amazon, Goodreads, or Open Library.
+
+Return format (JSON array only):
 [
   {
-    "title": "Book Title",
+    "title": "Complete Book Title",
     "author": "Author Name",
-    "cover_url": "https://...",
-    "summary": "Brief summary"
+    "cover_url": "https://covers.openlibrary.org/b/id/XXXXX-L.jpg",
+    "summary": "Engaging summary here."
   }
-]`, query)
+]
+
+Return the JSON array now:`, query)
 
 	reqBody := ChatRequest{
 		Model: "gpt-4o",
