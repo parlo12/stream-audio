@@ -172,6 +172,9 @@ func main() {
 		// adding a route to pull audio and backgrond music for a book
 		authorized.GET("/books/:book_id/pages/:page/audio", streamSinglePageAudioHandler)
 
+		// Book search/discovery endpoint - AI-powered book suggestions
+		authorized.POST("/search-books", SearchBooksHandler)
+
 	}
 
 	for _, r := range router.Routes() {
