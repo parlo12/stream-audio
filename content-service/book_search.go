@@ -260,7 +260,7 @@ CRITICAL REQUIREMENTS:
 2. Use Open Library cover URLs: https://covers.openlibrary.org/b/isbn/[ISBN]-L.jpg
 3. Or use direct Amazon/Goodreads image URLs
 4. If you don't have a real cover URL, use: "https://covers.openlibrary.org/b/isbn/0000000000-M.jpg"
-5. Return ONLY a valid JSON array
+5. Return ONLY valid JSON in the exact format specified
 6. NO markdown, NO code blocks, NO explanations, NO apologies
 7. Even if the query has typos (like "Harry Porter" for "Harry Potter"), return the correct books`
 
@@ -272,10 +272,8 @@ For each book, provide:
 - cover_url: Real image URL from Open Library (https://covers.openlibrary.org/b/isbn/XXXXXXXXXX-L.jpg) or Amazon
 - summary: 1-2 sentence description
 
-IMPORTANT: Return ONLY the JSON array, nothing else. Example format:
-[{"title":"Book Title","author":"Author Name","cover_url":"https://covers.openlibrary.org/b/isbn/9780439708180-L.jpg","summary":"Book summary."}]
-
-Return the JSON array:`, query)
+Return a JSON object with a "books" array. Example format:
+{"books":[{"title":"Book Title","author":"Author Name","cover_url":"https://covers.openlibrary.org/b/isbn/9780439708180-L.jpg","summary":"Book summary."}]}`, query)
 
 	reqBody := ChatRequest{
 		Model: "gpt-4o",
@@ -317,12 +315,22 @@ Return the JSON array:`, query)
 
 	// Parse the JSON from the response
 	jsonText := cleanJSONText(chatResp.Choices[0].Message.Content)
-	jsonText = extractJSONArray(jsonText)
+	log.Printf("📖 Raw JSON response: %s", jsonText)
 
-	var results []BookSuggestion
-	if err := json.Unmarshal([]byte(jsonText), &results); err != nil {
-		return nil, fmt.Errorf("failed to parse book results: %w", err)
+	// When using json_object mode, OpenAI returns an object, not an array
+	// First try to unmarshal as an object with a "books" field
+	var wrapper struct {
+		Books []BookSuggestion `json:"books"`
+	}
+	if err := json.Unmarshal([]byte(jsonText), &wrapper); err != nil {
+		// If that fails, try to extract and parse as array (fallback)
+		jsonText = extractJSONArray(jsonText)
+		var results []BookSuggestion
+		if err := json.Unmarshal([]byte(jsonText), &results); err != nil {
+			return nil, fmt.Errorf("failed to parse book results: %w. JSON: %s", err, jsonText)
+		}
+		return results, nil
 	}
 
-	return results, nil
+	return wrapper.Books, nil
 }
