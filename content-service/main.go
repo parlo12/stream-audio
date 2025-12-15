@@ -175,6 +175,12 @@ func main() {
 		// Book search/discovery endpoint - AI-powered book suggestions
 		authorized.POST("/search-books", SearchBooksHandler)
 
+		// Playback progress tracking endpoints
+		authorized.POST("/books/:book_id/progress", UpdatePlaybackProgressHandler)   // Update progress
+		authorized.GET("/books/:book_id/progress", GetPlaybackProgressHandler)       // Get progress for a book
+		authorized.GET("/progress", GetAllPlaybackProgressHandler)                   // Get all progress for user
+		authorized.DELETE("/books/:book_id/progress", DeletePlaybackProgressHandler) // Reset progress for a book
+
 	}
 
 	for _, r := range router.Routes() {
@@ -218,7 +224,7 @@ func setupDatabase() {
 
 	log.Println("DNS", dsn)
 
-	if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}); err != nil {
+	if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}, &PlaybackProgress{}); err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
 	}
 	log.Println("Database connected and migrated successfully")
@@ -524,6 +530,10 @@ func authMiddleware() gin.HandlerFunc {
 		// Attach claims to context
 		if claims, ok := token.Claims.(jwt.MapClaims); ok {
 			c.Set("claims", claims)
+			// Also set user_id for convenience
+			if userIDFloat, ok := claims["user_id"].(float64); ok {
+				c.Set("user_id", uint(userIDFloat))
+			}
 			c.Next()
 			return
 		}
