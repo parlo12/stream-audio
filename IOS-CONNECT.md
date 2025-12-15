@@ -724,7 +724,6 @@ Content-Type: application/json
 **Request:**
 ```json
 {
-  "book_id": 123,
   "current_position": 456.78,
   "duration": 3600.0,
   "chunk_index": 5
@@ -732,10 +731,11 @@ Content-Type: application/json
 ```
 
 **Parameters:**
-- `book_id` (required) - ID of the book
 - `current_position` (required) - Current playback position in seconds
 - `duration` (optional) - Total duration in seconds (auto-calculated if omitted)
 - `chunk_index` (optional) - Current chunk/page index
+
+**Note:** The `book_id` is specified in the URL path, not in the request body.
 
 **Response (Success - 200 OK):**
 ```json
@@ -757,7 +757,6 @@ Content-Type: application/json
 **Swift Example:**
 ```swift
 struct UpdateProgressRequest: Codable {
-    let book_id: Int
     let current_position: Double
     let duration: Double?
     let chunk_index: Int?
@@ -773,7 +772,6 @@ func updateProgress(bookID: Int, position: Double, duration: Double? = nil) {
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
     let body = UpdateProgressRequest(
-        book_id: bookID,
         current_position: position,
         duration: duration,
         chunk_index: nil

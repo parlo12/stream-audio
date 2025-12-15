@@ -25,7 +25,6 @@ type PlaybackProgress struct {
 
 // UpdateProgressRequest defines the JSON structure for updating progress
 type UpdateProgressRequest struct {
-	BookID          uint    `json:"book_id" binding:"required"`
 	CurrentPosition float64 `json:"current_position" binding:"required"` // Position in seconds
 	Duration        float64 `json:"duration"`                            // Total duration (optional, will be calculated if not provided)
 	ChunkIndex      int     `json:"chunk_index"`                         // Current chunk/page index
@@ -51,22 +50,25 @@ func UpdatePlaybackProgressHandler(c *gin.Context) {
 		return
 	}
 
-	// 2. Parse request body
+	// 2. Get book ID from URL parameter
+	bookID := c.Param("book_id")
+
+	// 3. Parse request body
 	var req UpdateProgressRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body", "details": err.Error()})
 		return
 	}
 
-	// 3. Validate that current_position is non-negative
+	// 4. Validate that current_position is non-negative
 	if req.CurrentPosition < 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "current_position must be non-negative"})
 		return
 	}
 
-	// 4. Verify the book exists and belongs to the user
+	// 5. Verify the book exists and belongs to the user
 	var book Book
-	if err := db.Where("id = ? AND user_id = ?", req.BookID, userID).First(&book).Error; err != nil {
+	if err := db.Where("id = ? AND user_id = ?", bookID, userID).First(&book).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Book not found or does not belong to user"})
 		} else {
@@ -75,11 +77,11 @@ func UpdatePlaybackProgressHandler(c *gin.Context) {
 		return
 	}
 
-	// 5. Calculate duration if not provided (from book chunks)
+	// 6. Calculate duration if not provided (from book chunks)
 	duration := req.Duration
 	if duration == 0 {
 		var chunks []BookChunk
-		if err := db.Where("book_id = ?", req.BookID).Order("index").Find(&chunks).Error; err == nil {
+		if err := db.Where("book_id = ?", bookID).Order("index").Find(&chunks).Error; err == nil {
 			if len(chunks) > 0 {
 				lastChunk := chunks[len(chunks)-1]
 				duration = float64(lastChunk.EndTime)
@@ -87,7 +89,7 @@ func UpdatePlaybackProgressHandler(c *gin.Context) {
 		}
 	}
 
-	// 6. Calculate completion percentage
+	// 7. Calculate completion percentage
 	completionPercent := 0.0
 	if duration > 0 {
 		completionPercent = (req.CurrentPosition / duration) * 100
@@ -96,15 +98,15 @@ func UpdatePlaybackProgressHandler(c *gin.Context) {
 		}
 	}
 
-	// 7. Find or create progress record
+	// 8. Find or create progress record
 	var progress PlaybackProgress
-	result := db.Where("user_id = ? AND book_id = ?", userID, req.BookID).First(&progress)
+	result := db.Where("user_id = ? AND book_id = ?", userID, bookID).First(&progress)
 
 	if result.Error == gorm.ErrRecordNotFound {
 		// Create new progress record
 		progress = PlaybackProgress{
 			UserID:            userID.(uint),
-			BookID:            req.BookID,
+			BookID:            book.ID,
 			CurrentPosition:   req.CurrentPosition,
 			Duration:          duration,
 			ChunkIndex:        req.ChunkIndex,
@@ -116,7 +118,7 @@ func UpdatePlaybackProgressHandler(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save progress", "details": err.Error()})
 			return
 		}
-		log.Printf("✅ Created new progress for user %d, book %d at %.2fs", userID, req.BookID, req.CurrentPosition)
+		log.Printf("✅ Created new progress for user %d, book %d at %.2fs", userID, book.ID, req.CurrentPosition)
 	} else if result.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error", "details": result.Error.Error()})
 		return
@@ -133,7 +135,7 @@ func UpdatePlaybackProgressHandler(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update progress", "details": err.Error()})
 			return
 		}
-		log.Printf("✅ Updated progress for user %d, book %d to %.2fs (%.1f%%)", userID, req.BookID, req.CurrentPosition, completionPercent)
+		log.Printf("✅ Updated progress for user %d, book %d to %.2fs (%.1f%%)", userID, book.ID, req.CurrentPosition, completionPercent)
 	}
 
 	// 8. Return updated progress
