@@ -20,10 +20,16 @@ type ChatMessage struct {
 
 // ChatRequest is the payload for the /v1/chat/completions endpoint.
 type ChatRequest struct {
-	Model       string        `json:"model"`
-	Messages    []ChatMessage `json:"messages"`
-	MaxTokens   int           `json:"max_tokens"`
-	Temperature float32       `json:"temperature"`
+	Model          string        `json:"model"`
+	Messages       []ChatMessage `json:"messages"`
+	MaxTokens      int           `json:"max_tokens"`
+	Temperature    float32       `json:"temperature"`
+	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+}
+
+// ResponseFormat specifies the format of the model's output
+type ResponseFormat struct {
+	Type string `json:"type"` // "json_object" or "text"
 }
 
 // ChatResponse models the subset of the response we need.

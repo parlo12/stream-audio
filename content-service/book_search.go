@@ -51,16 +51,12 @@ func SearchBooksHandler(c *gin.Context) {
 
 	log.Printf("🔍 Searching for books: %s", req.Query)
 
-	// 3. Search for books using OpenAI (try Responses API first, fallback to Chat)
-	results, err := searchBooksWithOpenAI(req.Query)
-	if err != nil || len(results) == 0 {
-		log.Printf("⚠️ Responses API failed or returned no results, trying Chat API: %v", err)
-		results, err = searchBooksWithChatCompletion(req.Query)
-		if err != nil {
-			log.Printf("❌ Both APIs failed to search books: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to search books", "details": err.Error()})
-			return
-		}
+	// 3. Search for books using OpenAI Chat API (more reliable than Responses API)
+	results, err := searchBooksWithChatCompletion(req.Query)
+	if err != nil {
+		log.Printf("❌ Failed to search books: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to search books", "details": err.Error()})
+		return
 	}
 
 	// 4. Return results (even if empty array)
@@ -257,37 +253,29 @@ func searchBooksWithChatCompletion(query string) ([]BookSuggestion, error) {
 		return nil, errors.New("OPENAI_API_KEY not set")
 	}
 
-	systemPrompt := `You are a book discovery assistant with access to book information. When given a book title or author name, return detailed information about matching books.
+	systemPrompt := `You are a book information expert. Return information about real, published books only.
 
-IMPORTANT: You must provide real book cover URLs from these sources:
-- Amazon book covers
-- Goodreads book covers
-- Open Library covers (https://covers.openlibrary.org/)
-- Publisher websites
+CRITICAL REQUIREMENTS:
+1. Provide REAL book cover image URLs only (no placeholders, no AI-generated images)
+2. Use Open Library cover URLs: https://covers.openlibrary.org/b/isbn/[ISBN]-L.jpg
+3. Or use direct Amazon/Goodreads image URLs
+4. If you don't have a real cover URL, use: "https://covers.openlibrary.org/b/isbn/0000000000-M.jpg"
+5. Return ONLY a valid JSON array
+6. NO markdown, NO code blocks, NO explanations, NO apologies
+7. Even if the query has typos (like "Harry Porter" for "Harry Potter"), return the correct books`
 
-Each result must include:
-- title: Full official book title
+	userPrompt := fmt.Sprintf(`Find up to 5 books matching: "%s"
+
+For each book, provide:
+- title: Full official title
 - author: Author's full name
-- cover_url: Direct image URL (must end in .jpg, .jpeg, or .png)
-- summary: Compelling 1-2 sentence description
+- cover_url: Real image URL from Open Library (https://covers.openlibrary.org/b/isbn/XXXXXXXXXX-L.jpg) or Amazon
+- summary: 1-2 sentence description
 
-Return ONLY a valid JSON array with no markdown formatting, code blocks, or explanations.`
+IMPORTANT: Return ONLY the JSON array, nothing else. Example format:
+[{"title":"Book Title","author":"Author Name","cover_url":"https://covers.openlibrary.org/b/isbn/9780439708180-L.jpg","summary":"Book summary."}]
 
-	userPrompt := fmt.Sprintf(`Search for books related to: "%s"
-
-Provide up to 5 book matches with complete information. Use real book cover URLs from Amazon, Goodreads, or Open Library.
-
-Return format (JSON array only):
-[
-  {
-    "title": "Complete Book Title",
-    "author": "Author Name",
-    "cover_url": "https://covers.openlibrary.org/b/id/XXXXX-L.jpg",
-    "summary": "Engaging summary here."
-  }
-]
-
-Return the JSON array now:`, query)
+Return the JSON array:`, query)
 
 	reqBody := ChatRequest{
 		Model: "gpt-4o",
@@ -295,8 +283,9 @@ Return the JSON array now:`, query)
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
 		},
-		Temperature: 0.7,
-		MaxTokens:   2000,
+		Temperature:    0.7,
+		MaxTokens:      2000,
+		ResponseFormat: &ResponseFormat{Type: "json_object"},
 	}
 
 	bodyBytes, _ := json.Marshal(reqBody)
