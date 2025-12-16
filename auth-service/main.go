@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,15 +31,17 @@ var db *gorm.DB
 
 // User defines the schema for the "users" table.
 type User struct {
-	ID               uint   `gorm:"primaryKey"`
-	Username         string `gorm:"unique;not null"`
-	Email            string `gorm:"unique;not null"`
-	Password         string `gorm:"not null"` // stored as a bcrypt hash
-	AccountType      string `gorm:"not null"` // e.g., "free" or "paid"
-	IsPublic         bool   `gorm:"default:true"`
-	State            string // user's state or location
-	StripeCustomerID string // for paid accounts
-	BooksRead        int    `gorm:"default:0"`
+	ID               uint      `gorm:"primaryKey"`
+	Username         string    `gorm:"unique;not null"`
+	Email            string    `gorm:"unique;not null"`
+	Password         string    `gorm:"not null"` // stored as a bcrypt hash
+	AccountType      string    `gorm:"not null"` // e.g., "free" or "paid"
+	IsPublic         bool      `gorm:"default:true"`
+	State            string    // user's state or location
+	StripeCustomerID string    // for paid accounts
+	BooksRead        int       `gorm:"default:0"`
+	IsAdmin          bool      `gorm:"default:false"`      // Admin access flag
+	LastActiveAt     time.Time `gorm:"default:CURRENT_TIMESTAMP"` // Last activity timestamp
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 }
@@ -88,6 +91,18 @@ func main() {
 		// Subscription management
 		authorized.GET("/subscription/status", getSubscriptionStatusHandler)
 		authorized.POST("/subscription/cancel", cancelSubscriptionHandler)
+		// Activity tracking
+		authorized.POST("/activity/ping", updateUserActivityHandler)
+	}
+
+	// Admin routes group
+	admin := router.Group("/admin")
+	admin.Use(authMiddleware(), adminMiddleware())
+	{
+		admin.GET("/stats", getAdminStatsHandler)
+		admin.GET("/users", listUsersHandler)
+		admin.GET("/users/active", getActiveUsersHandler)
+		admin.POST("/users/:user_id/admin", makeUserAdminHandler)
 	}
 
 	router.POST("/stripe/webhook", stripeWebhookHandler)
@@ -613,5 +628,225 @@ func cancelSubscriptionHandler(c *gin.Context) {
 		"current_period_end":     time.Unix(canceledSub.CurrentPeriodEnd, 0).Format(time.RFC3339),
 		"access_until":           time.Unix(canceledSub.CurrentPeriodEnd, 0).Format(time.RFC3339),
 		"info":                   "Your subscription will remain active until the end of your current billing period",
+	})
+}
+
+// ============================================================================
+// ADMIN HANDLERS
+// ============================================================================
+
+// adminMiddleware checks if the authenticated user has admin privileges
+func adminMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Get user ID from context (set by authMiddleware)
+		userID, exists := c.Get("user_id")
+		if !exists {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+			return
+		}
+
+		// Check if user is admin
+		var user User
+		if err := db.First(&user, userID).Error; err != nil {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "User not found"})
+			return
+		}
+
+		if !user.IsAdmin {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Admin access required"})
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// updateUserActivityHandler updates the user's last_active_at timestamp
+// POST /user/activity/ping
+func updateUserActivityHandler(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	// Update last_active_at
+	if err := db.Model(&User{}).Where("id = ?", userID).Update("last_active_at", time.Now()).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update activity"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Activity updated"})
+}
+
+// getAdminStatsHandler returns overall platform statistics
+// GET /admin/stats
+func getAdminStatsHandler(c *gin.Context) {
+	var stats struct {
+		TotalUsers      int64 `json:"total_users"`
+		PaidUsers       int64 `json:"paid_users"`
+		FreeUsers       int64 `json:"free_users"`
+		ActiveUsers     int64 `json:"active_users_7d"`
+		NewUsersToday   int64 `json:"new_users_today"`
+		NewUsersThisWeek int64 `json:"new_users_this_week"`
+	}
+
+	// Total users
+	db.Model(&User{}).Count(&stats.TotalUsers)
+
+	// Paid users
+	db.Model(&User{}).Where("account_type = ?", "paid").Count(&stats.PaidUsers)
+
+	// Free users
+	db.Model(&User{}).Where("account_type = ?", "free").Count(&stats.FreeUsers)
+
+	// Active users in last 7 days
+	sevenDaysAgo := time.Now().AddDate(0, 0, -7)
+	db.Model(&User{}).Where("last_active_at >= ?", sevenDaysAgo).Count(&stats.ActiveUsers)
+
+	// New users today
+	today := time.Now().Truncate(24 * time.Hour)
+	db.Model(&User{}).Where("created_at >= ?", today).Count(&stats.NewUsersToday)
+
+	// New users this week
+	db.Model(&User{}).Where("created_at >= ?", sevenDaysAgo).Count(&stats.NewUsersThisWeek)
+
+	c.JSON(http.StatusOK, stats)
+}
+
+// listUsersHandler returns a paginated list of all users
+// GET /admin/users?page=1&limit=50&account_type=paid
+func listUsersHandler(c *gin.Context) {
+	// Pagination parameters
+	page := 1
+	limit := 50
+	if p, err := strconv.Atoi(c.DefaultQuery("page", "1")); err == nil && p > 0 {
+		page = p
+	}
+	if l, err := strconv.Atoi(c.DefaultQuery("limit", "50")); err == nil && l > 0 && l <= 200 {
+		limit = l
+	}
+
+	offset := (page - 1) * limit
+
+	// Build query
+	query := db.Model(&User{})
+
+	// Filter by account type
+	if accountType := c.Query("account_type"); accountType != "" {
+		query = query.Where("account_type = ?", accountType)
+	}
+
+	// Filter by admin status
+	if isAdmin := c.Query("is_admin"); isAdmin == "true" {
+		query = query.Where("is_admin = ?", true)
+	}
+
+	// Search by username or email
+	if search := c.Query("search"); search != "" {
+		query = query.Where("username ILIKE ? OR email ILIKE ?", "%"+search+"%", "%"+search+"%")
+	}
+
+	// Get total count
+	var total int64
+	query.Count(&total)
+
+	// Get users
+	var users []User
+	if err := query.Select("id, username, email, account_type, is_admin, is_public, state, stripe_customer_id, books_read, last_active_at, created_at, updated_at").
+		Order("created_at DESC").
+		Limit(limit).
+		Offset(offset).
+		Find(&users).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch users"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"users":       users,
+		"total":       total,
+		"page":        page,
+		"limit":       limit,
+		"total_pages": (total + int64(limit) - 1) / int64(limit),
+	})
+}
+
+// getActiveUsersHandler returns users who have been active in the last N days
+// GET /admin/users/active?days=7
+func getActiveUsersHandler(c *gin.Context) {
+	// Default to 7 days
+	days := 7
+	if d, err := strconv.Atoi(c.DefaultQuery("days", "7")); err == nil && d > 0 {
+		days = d
+	}
+
+	cutoffDate := time.Now().AddDate(0, 0, -days)
+
+	type ActiveUser struct {
+		ID           uint      `json:"id"`
+		Username     string    `json:"username"`
+		Email        string    `json:"email"`
+		AccountType  string    `json:"account_type"`
+		LastActiveAt time.Time `json:"last_active_at"`
+		DaysActive   int       `json:"days_active"`
+		BooksRead    int       `json:"books_read"`
+	}
+
+	var activeUsers []ActiveUser
+	if err := db.Model(&User{}).
+		Select("id, username, email, account_type, last_active_at, books_read, EXTRACT(DAY FROM NOW() - last_active_at)::int as days_active").
+		Where("last_active_at >= ?", cutoffDate).
+		Order("last_active_at DESC").
+		Find(&activeUsers).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch active users"})
+		return
+	}
+
+	// Calculate activity stats
+	var weeklyActive, dailyActive int64
+	oneDayAgo := time.Now().AddDate(0, 0, -1)
+	db.Model(&User{}).Where("last_active_at >= ?", cutoffDate).Count(&weeklyActive)
+	db.Model(&User{}).Where("last_active_at >= ?", oneDayAgo).Count(&dailyActive)
+
+	c.JSON(http.StatusOK, gin.H{
+		"active_users":        activeUsers,
+		"total_active":        len(activeUsers),
+		"weekly_active_count": weeklyActive,
+		"daily_active_count":  dailyActive,
+		"days_filter":         days,
+	})
+}
+
+// makeUserAdminHandler promotes or demotes a user to/from admin
+// POST /admin/users/:user_id/admin
+func makeUserAdminHandler(c *gin.Context) {
+	userID := c.Param("user_id")
+
+	type AdminRequest struct {
+		IsAdmin bool `json:"is_admin" binding:"required"`
+	}
+
+	var req AdminRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request", "details": err.Error()})
+		return
+	}
+
+	// Update user admin status
+	if err := db.Model(&User{}).Where("id = ?", userID).Update("is_admin", req.IsAdmin).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update admin status"})
+		return
+	}
+
+	action := "granted"
+	if !req.IsAdmin {
+		action = "revoked"
+	}
+
+	log.Printf("✅ Admin access %s for user ID %s", action, userID)
+	c.JSON(http.StatusOK, gin.H{
+		"message":  fmt.Sprintf("Admin access %s successfully", action),
+		"user_id":  userID,
+		"is_admin": req.IsAdmin,
 	})
 }
