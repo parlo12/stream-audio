@@ -1488,6 +1488,219 @@ func startSubscription() {
 }
 ```
 
+### Get Subscription Status
+
+**Endpoint:** `GET /user/subscription/status`
+
+**Headers:**
+```
+Authorization: Bearer {token}
+```
+
+**Response (Active Subscription - 200 OK):**
+```json
+{
+  "account_type": "paid",
+  "has_subscription": true,
+  "subscription_id": "sub_1Abc123...",
+  "subscription_status": "active",
+  "current_period_start": "2025-12-01T00:00:00Z",
+  "current_period_end": "2026-01-01T00:00:00Z",
+  "cancel_at_period_end": false,
+  "canceled_at": 0,
+  "plan_name": "Premium Monthly",
+  "plan_amount": 999,
+  "plan_currency": "usd",
+  "plan_interval": "month"
+}
+```
+
+**Response (No Subscription - 200 OK):**
+```json
+{
+  "account_type": "free",
+  "has_subscription": false,
+  "subscription_status": "none",
+  "message": "No subscription found"
+}
+```
+
+**Swift Example:**
+```swift
+struct SubscriptionStatus: Codable {
+    let account_type: String
+    let has_subscription: Bool
+    let subscription_status: String
+    let subscription_id: String?
+    let current_period_start: String?
+    let current_period_end: String?
+    let cancel_at_period_end: Bool?
+    let plan_name: String?
+    let plan_amount: Int?
+    let plan_currency: String?
+    let plan_interval: String?
+    let message: String?
+}
+
+func getSubscriptionStatus(completion: @escaping (Result<SubscriptionStatus, Error>) -> Void) {
+    guard let token = KeychainSwift().get("auth_token") else { return }
+
+    let url = URL(string: "http://68.183.22.205:8080/user/subscription/status")!
+    var request = URLRequest(url: url)
+    request.httpMethod = "GET"
+    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+    URLSession.shared.dataTask(with: request) { data, response, error in
+        guard let data = data else {
+            completion(.failure(error ?? URLError(.badServerResponse)))
+            return
+        }
+
+        do {
+            let status = try JSONDecoder().decode(SubscriptionStatus.self, from: data)
+            completion(.success(status))
+        } catch {
+            completion(.failure(error))
+        }
+    }.resume()
+}
+
+// Usage in SwiftUI
+@State private var subscriptionStatus: SubscriptionStatus?
+
+var body: some View {
+    VStack {
+        if let status = subscriptionStatus {
+            if status.has_subscription {
+                Text("Status: \(status.subscription_status.capitalized)")
+                if let endDate = status.current_period_end {
+                    Text("Renews: \(endDate)")
+                }
+                if status.cancel_at_period_end == true {
+                    Text("Subscription will cancel at period end")
+                        .foregroundColor(.orange)
+                }
+            } else {
+                Text("No active subscription")
+                Button("Upgrade to Premium") {
+                    startSubscription()
+                }
+            }
+        }
+    }
+    .onAppear {
+        getSubscriptionStatus { result in
+            if case .success(let status) = result {
+                self.subscriptionStatus = status
+            }
+        }
+    }
+}
+```
+
+### Cancel Subscription
+
+**Endpoint:** `POST /user/subscription/cancel`
+
+**Headers:**
+```
+Authorization: Bearer {token}
+```
+
+**Response (Success - 200 OK):**
+```json
+{
+  "message": "Subscription canceled successfully",
+  "subscription_id": "sub_1Abc123...",
+  "cancel_at_period_end": true,
+  "current_period_end": "2026-01-01T00:00:00Z",
+  "access_until": "2026-01-01T00:00:00Z",
+  "info": "Your subscription will remain active until the end of your current billing period"
+}
+```
+
+**Response (No Subscription - 400 Bad Request):**
+```json
+{
+  "error": "No active subscription found to cancel"
+}
+```
+
+**Important Notes:**
+- Cancellation is scheduled for the end of the current billing period
+- User retains access until `current_period_end`
+- Account automatically downgrades to "free" when period ends
+- Stripe webhook handles the account downgrade
+- User can re-subscribe at any time
+
+**Swift Example:**
+```swift
+struct CancelSubscriptionResponse: Codable {
+    let message: String
+    let subscription_id: String?
+    let cancel_at_period_end: Bool?
+    let current_period_end: String?
+    let access_until: String?
+    let info: String?
+}
+
+func cancelSubscription(completion: @escaping (Result<CancelSubscriptionResponse, Error>) -> Void) {
+    guard let token = KeychainSwift().get("auth_token") else { return }
+
+    let url = URL(string: "http://68.183.22.205:8080/user/subscription/cancel")!
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+    URLSession.shared.dataTask(with: request) { data, response, error in
+        guard let data = data else {
+            completion(.failure(error ?? URLError(.badServerResponse)))
+            return
+        }
+
+        do {
+            let cancelResponse = try JSONDecoder().decode(CancelSubscriptionResponse.self, from: data)
+            completion(.success(cancelResponse))
+        } catch {
+            completion(.failure(error))
+        }
+    }.resume()
+}
+
+// Usage in SwiftUI with confirmation dialog
+@State private var showCancelConfirmation = false
+
+var body: some View {
+    Button("Cancel Subscription") {
+        showCancelConfirmation = true
+    }
+    .confirmationDialog(
+        "Cancel Subscription?",
+        isPresented: $showCancelConfirmation,
+        titleVisibility: .visible
+    ) {
+        Button("Yes, Cancel Subscription", role: .destructive) {
+            cancelSubscription { result in
+                switch result {
+                case .success(let response):
+                    print("✅ \(response.message)")
+                    if let accessUntil = response.access_until {
+                        print("Access until: \(accessUntil)")
+                    }
+                    // Refresh subscription status
+                    getSubscriptionStatus { _ in }
+                case .failure(let error):
+                    print("❌ Failed to cancel: \(error.localizedDescription)")
+                }
+            }
+        }
+        Button("Keep Subscription", role: .cancel) { }
+    } message: {
+        Text("Your subscription will remain active until the end of your current billing period. You can re-subscribe at any time.")
+    }
+}
+```
+
 ### Subscription Tiers
 
 #### Free Account
