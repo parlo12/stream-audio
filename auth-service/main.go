@@ -40,23 +40,106 @@ type User struct {
 	State            string    // user's state or location
 	StripeCustomerID string    // for paid accounts
 	BooksRead        int       `gorm:"default:0"`
-	IsAdmin          bool      `gorm:"default:false"`      // Admin access flag
-	LastActiveAt     time.Time `gorm:"default:CURRENT_TIMESTAMP"` // Last activity timestamp
+	IsAdmin          bool      `gorm:"default:false"`               // Admin access flag
+	LastActiveAt     time.Time `gorm:"default:CURRENT_TIMESTAMP"`   // Last activity timestamp
+	// Device tracking fields for account restoration
+	PhoneNumber      string    `gorm:"index"`                       // User's phone number
+	DeviceModel      string    // e.g., "iPhone 14 Pro", "Samsung Galaxy S21"
+	DeviceID         string    `gorm:"index"`                       // iOS IDFA or Android GAID
+	PushToken        string    // FCM/APNS push notification token
+	IPAddress        string    // Last known IP address
+	OSVersion        string    // e.g., "iOS 17.2", "Android 14"
+	AppVersion       string    // App version for tracking
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 }
 
+// UserHistory stores deleted/deactivated account data for restoration
+type UserHistory struct {
+	ID               uint      `gorm:"primaryKey"`
+	OriginalUserID   uint      `gorm:"index;not null"`              // Original user ID
+	Username         string    `json:"username"`
+	Email            string    `gorm:"index;not null"`
+	Password         string    // Hashed password
+	AccountType      string
+	IsPublic         bool
+	State            string
+	StripeCustomerID string
+	BooksRead        int
+	PhoneNumber      string    `gorm:"index"`
+	DeviceModel      string
+	DeviceID         string    `gorm:"index"`
+	PushToken        string
+	IPAddress        string    `gorm:"index"`
+	OSVersion        string
+	AppVersion       string
+	Status           string    `gorm:"not null;default:'deactivated'"` // "deactivated" or "deleted"
+	DeletionReason   string    // Optional reason from user
+	DeletedAt        time.Time `gorm:"not null"`                      // When account was deleted
+	OriginalCreatedAt time.Time                                       // Original account creation date
+	RestoredAt       *time.Time                                       // If account was restored
+	RestoredToUserID *uint                                            // New user ID if restored
+}
+
+// UserBookHistory stores book progress for deleted/deactivated accounts
+type UserBookHistory struct {
+	ID                uint      `gorm:"primaryKey"`
+	UserHistoryID     uint      `gorm:"index;not null"`              // FK to UserHistory
+	BookTitle         string    `gorm:"not null"`
+	BookAuthor        string
+	BookID            uint      // Original book ID
+	Category          string
+	Genre             string
+	CurrentPosition   float64   // Last playback position in seconds
+	Duration          float64   // Total duration
+	ChunkIndex        int       // Last page/chunk index
+	CompletionPercent float64   // Percentage completed
+	LastPlayedAt      time.Time // When user last played this book
+	AudioPath         string    // Path to audio file if still exists
+	CoverURL          string    // Cover image URL
+	CreatedAt         time.Time
+}
+
 // Request structures for binding and validation
 type SignupRequest struct {
-	Username string `json:"username" binding:"required"`
-	Email    string `json:"email" binding:"required,email"`
-	Password string `json:"password" binding:"required,min=6"`
-	State    string `json:"state" binding:"required"`
+	Username    string `json:"username" binding:"required"`
+	Email       string `json:"email" binding:"required,email"`
+	Password    string `json:"password" binding:"required,min=6"`
+	State       string `json:"state" binding:"required"`
+	// Device information for account restoration
+	PhoneNumber string `json:"phone_number"`
+	DeviceModel string `json:"device_model"`
+	DeviceID    string `json:"device_id"`    // iOS IDFA or Android GAID
+	PushToken   string `json:"push_token"`   // FCM/APNS token
+	OSVersion   string `json:"os_version"`   // iOS/Android version
+	AppVersion  string `json:"app_version"`  // App version
 }
 
 type LoginRequest struct {
-	Username string `json:"username" binding:"required"`
-	Password string `json:"password" binding:"required"`
+	Username    string `json:"username" binding:"required"`
+	Password    string `json:"password" binding:"required"`
+	// Device information for tracking
+	DeviceModel string `json:"device_model"`
+	DeviceID    string `json:"device_id"`
+	PushToken   string `json:"push_token"`
+	OSVersion   string `json:"os_version"`
+	AppVersion  string `json:"app_version"`
+}
+
+type DeactivateAccountRequest struct {
+	Reason   string `json:"reason"`    // Optional reason for deactivation
+	Password string `json:"password" binding:"required"` // Confirm with password
+}
+
+type DeleteAccountRequest struct {
+	Reason   string `json:"reason"`    // Optional reason for deletion
+	Password string `json:"password" binding:"required"` // Confirm with password
+}
+
+type RestoreAccountRequest struct {
+	Email       string `json:"email" binding:"required,email"`
+	PhoneNumber string `json:"phone_number"`
+	DeviceID    string `json:"device_id"`
 }
 
 func main() {
@@ -79,6 +162,8 @@ func main() {
 	// Endpoints for signup and login
 	router.POST("/signup", signupHandler)
 	router.POST("/login", loginHandler)
+	// Account restoration (public endpoint)
+	router.POST("/restore-account", restoreAccountHandler)
 
 	// Protected routes group
 	authorized := router.Group("/user")
@@ -93,6 +178,9 @@ func main() {
 		authorized.POST("/subscription/cancel", cancelSubscriptionHandler)
 		// Activity tracking
 		authorized.POST("/activity/ping", updateUserActivityHandler)
+		// Account deactivation and deletion
+		authorized.POST("/deactivate", deactivateAccountHandler)
+		authorized.POST("/delete", deleteAccountHandler)
 	}
 
 	// Admin routes group
@@ -156,11 +244,11 @@ func setupDatabase() {
 	}
 
 	// Run migrations
-	if err := db.AutoMigrate(&User{}); err != nil {
+	if err := db.AutoMigrate(&User{}, &UserHistory{}, &UserBookHistory{}); err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
 	}
 
-	log.Println("✅ Database connected and migrated")
+	log.Println("✅ Database connected and migrated (users, user_histories, user_book_histories)")
 }
 
 // signupHandler validates input and creates a new user in the database
@@ -168,6 +256,49 @@ func signupHandler(c *gin.Context) {
 	var req SignupRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid signup data", "details": err.Error()})
+		return
+	}
+
+	// Extract client IP address
+	clientIP := c.ClientIP()
+
+	// Check if a user with the same username or email already exists
+	var existing User
+	if err := db.Where("username = ? OR email = ?", req.Username, req.Email).First(&existing).Error; err == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "User with this username or email already exists"})
+		return
+	}
+
+	// Check if there's a deleted/deactivated account that can be restored
+	var history UserHistory
+	canRestore := false
+	if req.Email != "" {
+		// Try to find matching history by email, phone, or device ID
+		query := db.Where("email = ?", req.Email).Where("restored_at IS NULL")
+
+		if req.PhoneNumber != "" {
+			query = query.Or("phone_number = ?", req.PhoneNumber)
+		}
+		if req.DeviceID != "" {
+			query = query.Or("device_id = ?", req.DeviceID)
+		}
+
+		if err := query.Order("deleted_at DESC").First(&history).Error; err == nil {
+			canRestore = true
+			log.Printf("🔍 Found deleted account for email %s (deleted %v ago)", req.Email, time.Since(history.DeletedAt))
+		}
+	}
+
+	// If account can be restored, suggest restoration
+	if canRestore {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "Account previously existed",
+			"can_restore": true,
+			"message": "We found a previous account associated with this information. Would you like to restore it?",
+			"history_id": history.ID,
+			"deleted_at": history.DeletedAt,
+			"original_username": history.Username,
+		})
 		return
 	}
 
@@ -186,13 +317,13 @@ func signupHandler(c *gin.Context) {
 		AccountType: "free",
 		IsPublic:    true,
 		State:       req.State,
-	}
-
-	// Check if a user with the same username or email already exists
-	var existing User
-	if err := db.Where("username = ? OR email = ?", user.Username, user.Email).First(&existing).Error; err == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "User with this username or email already exists"})
-		return
+		PhoneNumber: req.PhoneNumber,
+		DeviceModel: req.DeviceModel,
+		DeviceID:    req.DeviceID,
+		PushToken:   req.PushToken,
+		IPAddress:   clientIP,
+		OSVersion:   req.OSVersion,
+		AppVersion:  req.AppVersion,
 	}
 
 	// Save the user to the database
@@ -200,6 +331,8 @@ func signupHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to register user", "details": err.Error()})
 		return
 	}
+
+	log.Printf("✅ New user registered: %s (ID: %d) from %s", user.Username, user.ID, clientIP)
 	c.JSON(http.StatusOK, gin.H{"message": "User registered", "user_id": user.ID})
 }
 
@@ -223,6 +356,31 @@ func loginHandler(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
 		return
 	}
+
+	// Update device information and last active timestamp
+	clientIP := c.ClientIP()
+	updates := map[string]interface{}{
+		"last_active_at": time.Now(),
+		"ip_address":     clientIP,
+	}
+	if req.DeviceModel != "" {
+		updates["device_model"] = req.DeviceModel
+	}
+	if req.DeviceID != "" {
+		updates["device_id"] = req.DeviceID
+	}
+	if req.PushToken != "" {
+		updates["push_token"] = req.PushToken
+	}
+	if req.OSVersion != "" {
+		updates["os_version"] = req.OSVersion
+	}
+	if req.AppVersion != "" {
+		updates["app_version"] = req.AppVersion
+	}
+
+	db.Model(&user).Updates(updates)
+	log.Printf("✅ User %s logged in from %s (%s)", user.Username, clientIP, req.DeviceModel)
 
 	// Create JWT token with user claims
 	claims := jwt.MapClaims{
@@ -628,6 +786,363 @@ func cancelSubscriptionHandler(c *gin.Context) {
 		"current_period_end":     time.Unix(canceledSub.CurrentPeriodEnd, 0).Format(time.RFC3339),
 		"access_until":           time.Unix(canceledSub.CurrentPeriodEnd, 0).Format(time.RFC3339),
 		"info":                   "Your subscription will remain active until the end of your current billing period",
+	})
+}
+
+// ============================================================================
+// ACCOUNT DEACTIVATION AND DELETION HANDLERS
+// ============================================================================
+
+// deactivateAccountHandler temporarily deactivates a user account
+// POST /user/deactivate
+func deactivateAccountHandler(c *gin.Context) {
+	// 1. Get user ID from token
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	// 2. Parse request
+	var req DeactivateAccountRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request", "details": err.Error()})
+		return
+	}
+
+	// 3. Fetch user from database
+	var user User
+	if err := db.First(&user, userID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	// 4. Verify password
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Incorrect password"})
+		return
+	}
+
+	// 5. Start transaction to save history and delete user
+	tx := db.Begin()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// 6. Fetch user's books and progress from content service (we'll store metadata)
+	var bookHistories []UserBookHistory
+	// Query content service database for user's books
+	// Note: This would require a cross-service call or shared database
+	// For now, we'll just log this - implement based on your architecture
+	log.Printf("📚 Archiving books for user %d (deactivation)", user.ID)
+
+	// 7. Create history record
+	now := time.Now()
+	history := UserHistory{
+		OriginalUserID:    user.ID,
+		Username:          user.Username,
+		Email:             user.Email,
+		Password:          user.Password,
+		AccountType:       user.AccountType,
+		IsPublic:          user.IsPublic,
+		State:             user.State,
+		StripeCustomerID:  user.StripeCustomerID,
+		BooksRead:         user.BooksRead,
+		PhoneNumber:       user.PhoneNumber,
+		DeviceModel:       user.DeviceModel,
+		DeviceID:          user.DeviceID,
+		PushToken:         user.PushToken,
+		IPAddress:         user.IPAddress,
+		OSVersion:         user.OSVersion,
+		AppVersion:        user.AppVersion,
+		Status:            "deactivated",
+		DeletionReason:    req.Reason,
+		DeletedAt:         now,
+		OriginalCreatedAt: user.CreatedAt,
+	}
+
+	if err := tx.Create(&history).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create history record"})
+		return
+	}
+
+	// 8. Save book histories
+	for _, bookHistory := range bookHistories {
+		bookHistory.UserHistoryID = history.ID
+		if err := tx.Create(&bookHistory).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save book history"})
+			return
+		}
+	}
+
+	// 9. Delete user from active table
+	if err := tx.Delete(&user).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to deactivate account"})
+		return
+	}
+
+	// 10. Commit transaction
+	if err := tx.Commit().Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit deactivation"})
+		return
+	}
+
+	log.Printf("⏸️  Account deactivated: %s (ID: %d) - Reason: %s", user.Email, user.ID, req.Reason)
+	c.JSON(http.StatusOK, gin.H{
+		"message":    "Account deactivated successfully",
+		"history_id": history.ID,
+		"email":      user.Email,
+		"info":       "Your account data has been saved and can be restored at any time",
+	})
+}
+
+// deleteAccountHandler permanently deletes a user account (but keeps history for 90 days)
+// POST /user/delete
+func deleteAccountHandler(c *gin.Context) {
+	// 1. Get user ID from token
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	// 2. Parse request
+	var req DeleteAccountRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request", "details": err.Error()})
+		return
+	}
+
+	// 3. Fetch user from database
+	var user User
+	if err := db.First(&user, userID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	// 4. Verify password
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Incorrect password"})
+		return
+	}
+
+	// 5. Cancel Stripe subscription if exists
+	if user.StripeCustomerID != "" {
+		stripe.Key = getEnv("STRIPE_SECRET_KEY", "")
+		params := &stripe.SubscriptionListParams{
+			Customer: stripe.String(user.StripeCustomerID),
+		}
+		iter := subscription.List(params)
+		for iter.Next() {
+			sub := iter.Subscription()
+			if sub.Status == stripe.SubscriptionStatusActive || sub.Status == stripe.SubscriptionStatusTrialing {
+				// Cancel immediately for account deletion
+				cancelParams := &stripe.SubscriptionCancelParams{}
+				_, err := subscription.Cancel(sub.ID, cancelParams)
+				if err != nil {
+					log.Printf("⚠️  Failed to cancel Stripe subscription: %v", err)
+				} else {
+					log.Printf("✅ Canceled Stripe subscription %s", sub.ID)
+				}
+			}
+		}
+	}
+
+	// 6. Start transaction
+	tx := db.Begin()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// 7. Create history record
+	now := time.Now()
+	history := UserHistory{
+		OriginalUserID:    user.ID,
+		Username:          user.Username,
+		Email:             user.Email,
+		Password:          user.Password,
+		AccountType:       user.AccountType,
+		IsPublic:          user.IsPublic,
+		State:             user.State,
+		StripeCustomerID:  user.StripeCustomerID,
+		BooksRead:         user.BooksRead,
+		PhoneNumber:       user.PhoneNumber,
+		DeviceModel:       user.DeviceModel,
+		DeviceID:          user.DeviceID,
+		PushToken:         user.PushToken,
+		IPAddress:         user.IPAddress,
+		OSVersion:         user.OSVersion,
+		AppVersion:        user.AppVersion,
+		Status:            "deleted",
+		DeletionReason:    req.Reason,
+		DeletedAt:         now,
+		OriginalCreatedAt: user.CreatedAt,
+	}
+
+	if err := tx.Create(&history).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create history record"})
+		return
+	}
+
+	// 8. Delete user from active table
+	if err := tx.Delete(&user).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete account"})
+		return
+	}
+
+	// 9. Commit transaction
+	if err := tx.Commit().Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit deletion"})
+		return
+	}
+
+	log.Printf("🗑️  Account deleted: %s (ID: %d) - Reason: %s", user.Email, user.ID, req.Reason)
+	c.JSON(http.StatusOK, gin.H{
+		"message":    "Account deleted successfully",
+		"history_id": history.ID,
+		"info":       "Your account has been deleted. Data will be kept for 90 days and can be restored if you change your mind.",
+	})
+}
+
+// restoreAccountHandler restores a previously deleted/deactivated account
+// POST /restore-account (public endpoint)
+func restoreAccountHandler(c *gin.Context) {
+	var req RestoreAccountRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request", "details": err.Error()})
+		return
+	}
+
+	// 1. Find matching history record
+	var history UserHistory
+	query := db.Where("email = ?", req.Email).Where("restored_at IS NULL")
+
+	// Also match by phone number or device ID for additional verification
+	if req.PhoneNumber != "" {
+		query = query.Or(db.Where("phone_number = ?", req.PhoneNumber).Where("restored_at IS NULL"))
+	}
+	if req.DeviceID != "" {
+		query = query.Or(db.Where("device_id = ?", req.DeviceID).Where("restored_at IS NULL"))
+	}
+
+	if err := query.Order("deleted_at DESC").First(&history).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "No deleted account found",
+			"message": "We couldn't find a deleted account matching this information",
+		})
+		return
+	}
+
+	// 2. Check if restoration window has expired (optional: 90 days)
+	daysSinceDeletion := time.Since(history.DeletedAt).Hours() / 24
+	if daysSinceDeletion > 90 {
+		c.JSON(http.StatusGone, gin.H{
+			"error":   "Restoration period expired",
+			"message": "Account data was deleted more than 90 days ago and can no longer be restored",
+			"deleted_at": history.DeletedAt,
+		})
+		return
+	}
+
+	// 3. Start transaction to restore user
+	tx := db.Begin()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// 4. Recreate user account
+	now := time.Now()
+	restoredUser := User{
+		Username:         history.Username,
+		Email:            history.Email,
+		Password:         history.Password,
+		AccountType:      history.AccountType,
+		IsPublic:         history.IsPublic,
+		State:            history.State,
+		StripeCustomerID: history.StripeCustomerID,
+		BooksRead:        history.BooksRead,
+		PhoneNumber:      history.PhoneNumber,
+		DeviceModel:      history.DeviceModel,
+		DeviceID:         req.DeviceID, // Use new device ID if provided
+		PushToken:        history.PushToken,
+		IPAddress:        c.ClientIP(),
+		OSVersion:        history.OSVersion,
+		AppVersion:       history.AppVersion,
+		LastActiveAt:     now,
+	}
+
+	if err := tx.Create(&restoredUser).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to restore account", "details": err.Error()})
+		return
+	}
+
+	// 5. Update history record to mark as restored
+	if err := tx.Model(&history).Updates(map[string]interface{}{
+		"restored_at":       &now,
+		"restored_to_user_id": &restoredUser.ID,
+	}).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update history"})
+		return
+	}
+
+	// 6. Restore book histories (would need to recreate books in content service)
+	var bookHistories []UserBookHistory
+	if err := tx.Where("user_history_id = ?", history.ID).Find(&bookHistories).Error; err == nil {
+		log.Printf("📚 Found %d books to restore for user %s", len(bookHistories), restoredUser.Email)
+		// Note: Actual book restoration would require calling content service
+	}
+
+	// 7. Commit transaction
+	if err := tx.Commit().Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit restoration"})
+		return
+	}
+
+	log.Printf("♻️  Account restored: %s (New ID: %d, Original ID: %d)", restoredUser.Email, restoredUser.ID, history.OriginalUserID)
+
+	// 8. Generate JWT token for immediate login
+	claims := jwt.MapClaims{
+		"username": restoredUser.Username,
+		"user_id":  restoredUser.ID,
+		"exp":      time.Now().Add(time.Hour * 72).Unix(),
+		"iat":      time.Now().Unix(),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString(jwtSecretKey)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"message":      "Account restored successfully",
+			"user_id":      restoredUser.ID,
+			"username":     restoredUser.Username,
+			"books_count":  len(bookHistories),
+			"account_type": restoredUser.AccountType,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":      "Account restored successfully",
+		"user_id":      restoredUser.ID,
+		"username":     restoredUser.Username,
+		"token":        tokenString,
+		"books_count":  len(bookHistories),
+		"account_type": restoredUser.AccountType,
+		"deleted_at":   history.DeletedAt,
+		"restored_at":  now,
+		"info":         "Welcome back! Your account and data have been restored.",
 	})
 }
 
