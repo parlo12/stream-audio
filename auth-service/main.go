@@ -280,8 +280,8 @@ func createCheckoutSessionHandler(c *gin.Context) {
 				Quantity: stripe.Int64(1),
 			},
 		},
-		SuccessURL: stripe.String("68.183.22.205/thank-you-page"),
-		CancelURL:  stripe.String("68.183.22.205/cancel"),
+		SuccessURL: stripe.String("http://68.183.22.205/thank-you-page"),
+		CancelURL:  stripe.String("http://68.183.22.205/cancel"),
 	}
 	s, err := session.New(params)
 	if err != nil {
