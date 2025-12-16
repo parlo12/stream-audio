@@ -259,10 +259,10 @@ func cleanTextForNarration(text string) string {
 
 	// Remove quotation marks (dialogue is already split)
 	text = strings.ReplaceAll(text, "\"", "")
-	text = strings.ReplaceAll(text, """, "")
-	text = strings.ReplaceAll(text, """, "")
-	text = strings.ReplaceAll(text, "'", "'") // Normalize smart quotes to regular apostrophes
-	text = strings.ReplaceAll(text, "'", "'")
+	text = strings.ReplaceAll(text, "\u201c", "") // Left double quotation mark
+	text = strings.ReplaceAll(text, "\u201d", "") // Right double quotation mark
+	text = strings.ReplaceAll(text, "\u2018", "'") // Normalize left single quote to apostrophe
+	text = strings.ReplaceAll(text, "\u2019", "'") // Normalize right single quote to apostrophe
 
 	// Keep natural punctuation: . , ! ? ; : ... —
 	// These help the TTS engine add natural pauses and intonation
