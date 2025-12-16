@@ -20,6 +20,7 @@ import (
 	"github.com/stripe/stripe-go/v78"
 	"github.com/stripe/stripe-go/v78/checkout/session"
 	"github.com/stripe/stripe-go/v78/customer"
+	"github.com/stripe/stripe-go/v78/subscription"
 	"github.com/stripe/stripe-go/v78/webhook"
 )
 
@@ -84,6 +85,9 @@ func main() {
 		// adding stripe checkout session
 		authorized.POST("/stripe/create-checkout-session", createCheckoutSessionHandler)
 		authorized.GET("/account-type", getAccountTypeHandler)
+		// Subscription management
+		authorized.GET("/subscription/status", getSubscriptionStatusHandler)
+		authorized.POST("/subscription/cancel", cancelSubscriptionHandler)
 	}
 
 	router.POST("/stripe/webhook", stripeWebhookHandler)
@@ -452,4 +456,162 @@ func extractToken(authHeader string) (string, error) {
 		return "", errors.New("Authorization header format must be Bearer {token}")
 	}
 	return parts[1], nil
+}
+
+// getSubscriptionStatusHandler retrieves the user's current subscription status from Stripe
+// GET /user/subscription/status
+func getSubscriptionStatusHandler(c *gin.Context) {
+	// 1. Get user ID from token
+	claims, exists := c.Get("claims")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+	userClaims := claims.(jwt.MapClaims)
+	userID := uint(userClaims["user_id"].(float64))
+
+	// 2. Lookup user from DB
+	var user User
+	if err := db.First(&user, userID).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "User not found"})
+		return
+	}
+
+	// 3. Check if user has a Stripe customer ID
+	if user.StripeCustomerID == "" {
+		c.JSON(http.StatusOK, gin.H{
+			"account_type":        user.AccountType,
+			"has_subscription":    false,
+			"subscription_status": "none",
+			"message":             "No subscription found",
+		})
+		return
+	}
+
+	// 4. Set Stripe API key
+	stripe.Key = getEnv("STRIPE_SECRET_KEY", "")
+
+	// 5. List subscriptions for the customer
+	params := &stripe.SubscriptionListParams{
+		Customer: stripe.String(user.StripeCustomerID),
+	}
+	iter := subscription.List(params)
+
+	var activeSub *stripe.Subscription
+	for iter.Next() {
+		sub := iter.Subscription()
+		if sub.Status == stripe.SubscriptionStatusActive || sub.Status == stripe.SubscriptionStatusTrialing {
+			activeSub = sub
+			break
+		}
+	}
+
+	if err := iter.Err(); err != nil {
+		log.Printf("❌ Error fetching subscriptions: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch subscription status"})
+		return
+	}
+
+	// 6. Return subscription details
+	if activeSub != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"account_type":           user.AccountType,
+			"has_subscription":       true,
+			"subscription_id":        activeSub.ID,
+			"subscription_status":    activeSub.Status,
+			"current_period_start":   time.Unix(activeSub.CurrentPeriodStart, 0).Format(time.RFC3339),
+			"current_period_end":     time.Unix(activeSub.CurrentPeriodEnd, 0).Format(time.RFC3339),
+			"cancel_at_period_end":   activeSub.CancelAtPeriodEnd,
+			"canceled_at":            activeSub.CanceledAt,
+			"plan_name":              activeSub.Items.Data[0].Price.Nickname,
+			"plan_amount":            activeSub.Items.Data[0].Price.UnitAmount,
+			"plan_currency":          activeSub.Items.Data[0].Price.Currency,
+			"plan_interval":          activeSub.Items.Data[0].Price.Recurring.Interval,
+		})
+	} else {
+		c.JSON(http.StatusOK, gin.H{
+			"account_type":        user.AccountType,
+			"has_subscription":    false,
+			"subscription_status": "inactive",
+			"message":             "No active subscription found",
+		})
+	}
+}
+
+// cancelSubscriptionHandler cancels the user's active subscription
+// POST /user/subscription/cancel
+func cancelSubscriptionHandler(c *gin.Context) {
+	// 1. Get user ID from token
+	claims, exists := c.Get("claims")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+	userClaims := claims.(jwt.MapClaims)
+	userID := uint(userClaims["user_id"].(float64))
+
+	// 2. Lookup user from DB
+	var user User
+	if err := db.First(&user, userID).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "User not found"})
+		return
+	}
+
+	// 3. Check if user has a Stripe customer ID
+	if user.StripeCustomerID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No subscription found to cancel"})
+		return
+	}
+
+	// 4. Set Stripe API key
+	stripe.Key = getEnv("STRIPE_SECRET_KEY", "")
+
+	// 5. Find active subscription
+	params := &stripe.SubscriptionListParams{
+		Customer: stripe.String(user.StripeCustomerID),
+	}
+	iter := subscription.List(params)
+
+	var activeSub *stripe.Subscription
+	for iter.Next() {
+		sub := iter.Subscription()
+		if sub.Status == stripe.SubscriptionStatusActive || sub.Status == stripe.SubscriptionStatusTrialing {
+			activeSub = sub
+			break
+		}
+	}
+
+	if err := iter.Err(); err != nil {
+		log.Printf("❌ Error fetching subscriptions: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch subscription"})
+		return
+	}
+
+	if activeSub == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No active subscription found to cancel"})
+		return
+	}
+
+	// 6. Cancel the subscription at period end (user keeps access until billing cycle ends)
+	cancelParams := &stripe.SubscriptionParams{
+		CancelAtPeriodEnd: stripe.Bool(true),
+	}
+	canceledSub, err := subscription.Update(activeSub.ID, cancelParams)
+	if err != nil {
+		log.Printf("❌ Error canceling subscription: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to cancel subscription", "details": err.Error()})
+		return
+	}
+
+	log.Printf("✅ User %s (%d) canceled subscription %s", user.Email, user.ID, canceledSub.ID)
+
+	// 7. Return cancellation details
+	c.JSON(http.StatusOK, gin.H{
+		"message":                "Subscription canceled successfully",
+		"subscription_id":        canceledSub.ID,
+		"cancel_at_period_end":   canceledSub.CancelAtPeriodEnd,
+		"current_period_end":     time.Unix(canceledSub.CurrentPeriodEnd, 0).Format(time.RFC3339),
+		"access_until":           time.Unix(canceledSub.CurrentPeriodEnd, 0).Format(time.RFC3339),
+		"info":                   "Your subscription will remain active until the end of your current billing period",
+	})
 }
