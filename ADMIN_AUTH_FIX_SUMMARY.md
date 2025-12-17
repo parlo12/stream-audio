@@ -215,4 +215,37 @@ docker-compose up -d --build auth-service
 - Type-safe boolean validation
 
 **Date:** December 17, 2025
-**Commits:** `9ac69f7`, `0d9c453`
+**Commits:** `9ac69f7`, `0d9c453`, `947ec3b`
+
+---
+
+## ✅ Additional Fix: Exclude Admins from Statistics
+
+### Fix 3: Admin User Exclusion from Stats
+**Commit:** `947ec3b` - fix: Exclude admin users from all admin statistics and user lists
+
+**Problem:** Admin users were being counted in all statistics (total users, paid users, active users, etc.), which inflated the numbers and made analytics inaccurate.
+
+**Solution:** Added `WHERE is_admin = false` to all user count queries.
+
+**Files Changed:**
+- [auth-service/main.go:1220-1238](auth-service/main.go#L1220-L1238) - getAdminStatsHandler (exclude admins from all counts)
+- [auth-service/main.go:1266-1274](auth-service/main.go#L1266-L1274) - listUsersHandler (exclude admins by default)
+- [auth-service/main.go:1329-1340](auth-service/main.go#L1329-L1340) - getActiveUsersHandler (exclude admins from active users)
+
+**Query Changes:**
+```sql
+-- Before (includes admins):
+SELECT COUNT(*) FROM users;
+SELECT COUNT(*) FROM users WHERE account_type = 'paid';
+
+-- After (excludes admins):
+SELECT COUNT(*) FROM users WHERE is_admin = false;
+SELECT COUNT(*) FROM users WHERE account_type = 'paid' AND is_admin = false;
+```
+
+**Benefits:**
+- ✅ Accurate user statistics (admins not counted as regular users)
+- ✅ Accurate paid/free user counts
+- ✅ Accurate active user metrics
+- ✅ Admins can still view admin users with `?is_admin=true` query parameter
