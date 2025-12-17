@@ -1155,21 +1155,30 @@ func restoreAccountHandler(c *gin.Context) {
 // adminMiddleware checks if the authenticated user has admin privileges
 func adminMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Get user ID from context (set by authMiddleware)
-		userID, exists := c.Get("user_id")
+		// Get claims from context (set by authMiddleware)
+		claims, exists := c.Get("claims")
 		if !exists {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 			return
 		}
 
-		// Check if user is admin
-		var user User
-		if err := db.First(&user, userID).Error; err != nil {
-			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "User not found"})
+		// Extract is_admin from JWT token claims
+		claimsMap, ok := claims.(jwt.MapClaims)
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid token claims"})
 			return
 		}
 
-		if !user.IsAdmin {
+		// Check if is_admin claim exists and is true
+		isAdmin, exists := claimsMap["is_admin"]
+		if !exists {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Admin access required"})
+			return
+		}
+
+		// Validate that is_admin is a boolean and is true
+		adminBool, ok := isAdmin.(bool)
+		if !ok || !adminBool {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Admin access required"})
 			return
 		}
