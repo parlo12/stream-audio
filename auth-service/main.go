@@ -191,6 +191,12 @@ func main() {
 		admin.GET("/users", listUsersHandler)
 		admin.GET("/users/active", getActiveUsersHandler)
 		admin.POST("/users/:user_id/admin", makeUserAdminHandler)
+
+		// Maintenance endpoints
+		admin.POST("/system/wipe", wipeSystemHandler)
+		admin.DELETE("/users/:user_id/files", deleteUserFilesHandler)
+		admin.DELETE("/users/:user_id/data", deleteUserDataHandler)
+		admin.DELETE("/users/:user_id/complete", deleteUserCompleteHandler)
 	}
 
 	router.POST("/stripe/webhook", stripeWebhookHandler)
@@ -1379,5 +1385,290 @@ func makeUserAdminHandler(c *gin.Context) {
 		"message":  fmt.Sprintf("Admin access %s successfully", action),
 		"user_id":  userID,
 		"is_admin": req.IsAdmin,
+	})
+}
+
+// ============================================================================
+// MAINTENANCE ENDPOINTS
+// ============================================================================
+
+// wipeSystemHandler wipes all non-admin users and their data from the system
+// POST /admin/system/wipe
+// WARNING: This is a destructive operation - requires confirmation token
+func wipeSystemHandler(c *gin.Context) {
+	type WipeRequest struct {
+		ConfirmationToken string `json:"confirmation_token" binding:"required"`
+	}
+
+	var req WipeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing confirmation_token"})
+		return
+	}
+
+	// Safety check: require exact confirmation token
+	if req.ConfirmationToken != "WIPE_ALL_USER_DATA_CONFIRM" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Invalid confirmation token. This operation requires explicit confirmation."})
+		return
+	}
+
+	// Get admin user ID from context to exclude from wipe
+	claims, _ := c.Get("claims")
+	claimsMap := claims.(jwt.MapClaims)
+	adminUserID := uint(claimsMap["user_id"].(float64))
+
+	log.Printf("🚨 SYSTEM WIPE initiated by admin user ID %d", adminUserID)
+
+	// Begin transaction for data consistency
+	tx := db.Begin()
+	if tx.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
+		return
+	}
+
+	// Count users before deletion
+	var totalUsers, adminUsers int64
+	tx.Model(&User{}).Where("is_admin = ?", false).Count(&totalUsers)
+	tx.Model(&User{}).Where("is_admin = ?", true).Count(&adminUsers)
+
+	// Delete user_book_histories for non-admin users
+	if err := tx.Where("user_id IN (SELECT id FROM users WHERE is_admin = false)").Delete(&UserBookHistory{}).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user book histories"})
+		return
+	}
+
+	// Delete user_histories for non-admin users
+	if err := tx.Where("user_id IN (SELECT id FROM users WHERE is_admin = false)").Delete(&UserHistory{}).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user histories"})
+		return
+	}
+
+	// Delete all non-admin users
+	if err := tx.Where("is_admin = ?", false).Delete(&User{}).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete users"})
+		return
+	}
+
+	// Commit transaction
+	if err := tx.Commit().Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit wipe operation"})
+		return
+	}
+
+	log.Printf("✅ SYSTEM WIPE completed: %d users deleted, %d admin accounts preserved", totalUsers, adminUsers)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":         "System wiped successfully",
+		"users_deleted":   totalUsers,
+		"admins_preserved": adminUsers,
+		"wiped_by_admin":  adminUserID,
+	})
+}
+
+// deleteUserFilesHandler deletes all files generated for a specific user
+// DELETE /admin/users/:user_id/files
+func deleteUserFilesHandler(c *gin.Context) {
+	userIDStr := c.Param("user_id")
+	userID, err := strconv.ParseUint(userIDStr, 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user_id"})
+		return
+	}
+
+	// Verify user exists
+	var user User
+	if err := db.First(&user, userID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	// Make HTTP request to content-service to delete user files
+	contentServiceURL := os.Getenv("CONTENT_SERVICE_URL")
+	if contentServiceURL == "" {
+		contentServiceURL = "http://content-service:8083"
+	}
+
+	deleteURL := fmt.Sprintf("%s/admin/users/%d/files", contentServiceURL, userID)
+	req, err := http.NewRequest("DELETE", deleteURL, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create delete request"})
+		return
+	}
+
+	// Forward the admin token to content-service
+	authHeader := c.GetHeader("Authorization")
+	req.Header.Set("Authorization", authHeader)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to contact content service", "details": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := ioutil.ReadAll(resp.Body)
+		c.JSON(resp.StatusCode, gin.H{"error": "Content service error", "details": string(body)})
+		return
+	}
+
+	// Parse response from content-service
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decode response"})
+		return
+	}
+
+	log.Printf("🗑️ Files deleted for user ID %d by admin", userID)
+	c.JSON(http.StatusOK, result)
+}
+
+// deleteUserDataHandler deletes all database records for a specific user
+// DELETE /admin/users/:user_id/data
+func deleteUserDataHandler(c *gin.Context) {
+	userIDStr := c.Param("user_id")
+	userID, err := strconv.ParseUint(userIDStr, 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user_id"})
+		return
+	}
+
+	// Verify user exists and is not an admin
+	var user User
+	if err := db.First(&user, userID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	if user.IsAdmin {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Cannot delete admin user data"})
+		return
+	}
+
+	// Begin transaction
+	tx := db.Begin()
+	if tx.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
+		return
+	}
+
+	// Delete user_book_histories
+	if err := tx.Where("user_id = ?", userID).Delete(&UserBookHistory{}).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user book histories"})
+		return
+	}
+
+	// Delete user_histories
+	if err := tx.Where("user_id = ?", userID).Delete(&UserHistory{}).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user histories"})
+		return
+	}
+
+	// Delete the user
+	if err := tx.Delete(&user).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user"})
+		return
+	}
+
+	// Commit transaction
+	if err := tx.Commit().Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit deletion"})
+		return
+	}
+
+	log.Printf("🗑️ Database records deleted for user ID %d (%s) by admin", userID, user.Username)
+	c.JSON(http.StatusOK, gin.H{
+		"message":  "User data deleted successfully",
+		"user_id":  userID,
+		"username": user.Username,
+		"email":    user.Email,
+	})
+}
+
+// deleteUserCompleteHandler deletes both files and database records for a user
+// DELETE /admin/users/:user_id/complete
+func deleteUserCompleteHandler(c *gin.Context) {
+	userIDStr := c.Param("user_id")
+	userID, err := strconv.ParseUint(userIDStr, 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user_id"})
+		return
+	}
+
+	// Verify user exists and is not an admin
+	var user User
+	if err := db.First(&user, userID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	if user.IsAdmin {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Cannot delete admin user"})
+		return
+	}
+
+	// Step 1: Delete files from content-service
+	contentServiceURL := os.Getenv("CONTENT_SERVICE_URL")
+	if contentServiceURL == "" {
+		contentServiceURL = "http://content-service:8083"
+	}
+
+	deleteURL := fmt.Sprintf("%s/admin/users/%d/files", contentServiceURL, userID)
+	req, err := http.NewRequest("DELETE", deleteURL, nil)
+	if err == nil {
+		authHeader := c.GetHeader("Authorization")
+		req.Header.Set("Authorization", authHeader)
+
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("⚠️ Warning: Failed to delete files for user %d: %v", userID, err)
+		} else {
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				log.Printf("⚠️ Warning: Content service returned %d when deleting files for user %d", resp.StatusCode, userID)
+			}
+		}
+	}
+
+	// Step 2: Delete database records
+	tx := db.Begin()
+	if tx.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
+		return
+	}
+
+	// Delete user_book_histories
+	tx.Where("user_id = ?", userID).Delete(&UserBookHistory{})
+
+	// Delete user_histories
+	tx.Where("user_id = ?", userID).Delete(&UserHistory{})
+
+	// Delete the user
+	if err := tx.Delete(&user).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user"})
+		return
+	}
+
+	// Commit transaction
+	if err := tx.Commit().Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit deletion"})
+		return
+	}
+
+	log.Printf("🗑️ Complete deletion (files + data) for user ID %d (%s) by admin", userID, user.Username)
+	c.JSON(http.StatusOK, gin.H{
+		"message":  "User completely deleted (files + database)",
+		"user_id":  userID,
+		"username": user.Username,
+		"email":    user.Email,
 	})
 }

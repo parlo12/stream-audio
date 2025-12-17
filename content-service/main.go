@@ -183,6 +183,13 @@ func main() {
 
 	}
 
+	// Admin routes group
+	admin := router.Group("/admin")
+	admin.Use(authMiddleware(), adminMiddleware())
+	{
+		admin.DELETE("/users/:user_id/files", deleteUserFilesContentHandler)
+	}
+
 	for _, r := range router.Routes() {
 		log.Printf("→ %s %s", r.Method, r.Path)
 	}
@@ -542,6 +549,41 @@ func authMiddleware() gin.HandlerFunc {
 	}
 }
 
+// adminMiddleware checks if the authenticated user has admin privileges
+func adminMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Get claims from context (set by authMiddleware)
+		claims, exists := c.Get("claims")
+		if !exists {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+			return
+		}
+
+		// Extract is_admin from JWT token claims
+		claimsMap, ok := claims.(jwt.MapClaims)
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid token claims"})
+			return
+		}
+
+		// Check if is_admin claim exists and is true
+		isAdmin, exists := claimsMap["is_admin"]
+		if !exists {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Admin access required"})
+			return
+		}
+
+		// Validate that is_admin is a boolean and is true
+		adminBool, ok := isAdmin.(bool)
+		if !ok || !adminBool {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Admin access required"})
+			return
+		}
+
+		c.Next()
+	}
+}
+
 // adding helper function to get user account type
 
 func getUserAccountType(token string) (string, error) {
@@ -738,6 +780,120 @@ func getSingleBookHandler(c *gin.Context) {
 		"book": bookResponse,
 	})
 
+}
+
+// deleteUserFilesContentHandler deletes all files for a specific user
+// DELETE /admin/users/:user_id/files
+func deleteUserFilesContentHandler(c *gin.Context) {
+	userIDStr := c.Param("user_id")
+	userID, err := strconv.ParseUint(userIDStr, 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user_id"})
+		return
+	}
+
+	// Find all books for this user
+	var books []Book
+	if err := db.Where("user_id = ?", userID).Find(&books).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user books"})
+		return
+	}
+
+	// Track deletion stats
+	var filesDeleted, audioDeleted, coversDeleted, uploadsDeleted int
+	var totalBooksDeleted, totalChunksDeleted int64
+
+	// Delete files for each book
+	for _, book := range books {
+		// Delete book file
+		if book.FilePath != "" {
+			if err := os.Remove(book.FilePath); err == nil {
+				uploadsDeleted++
+				log.Printf("🗑️ Deleted upload: %s", book.FilePath)
+			}
+		}
+
+		// Delete audio file
+		if book.AudioPath != "" {
+			if err := os.Remove(book.AudioPath); err == nil {
+				audioDeleted++
+				log.Printf("🗑️ Deleted audio: %s", book.AudioPath)
+			}
+		}
+
+		// Delete cover file
+		if book.CoverPath != "" {
+			if err := os.Remove(book.CoverPath); err == nil {
+				coversDeleted++
+				log.Printf("🗑️ Deleted cover: %s", book.CoverPath)
+			}
+		}
+
+		// Find and delete chunk audio files
+		var chunks []BookChunk
+		db.Where("book_id = ?", book.ID).Find(&chunks)
+		for _, chunk := range chunks {
+			if chunk.AudioPath != "" {
+				if err := os.Remove(chunk.AudioPath); err == nil {
+					filesDeleted++
+				}
+			}
+			if chunk.FinalAudioPath != "" {
+				if err := os.Remove(chunk.FinalAudioPath); err == nil {
+					filesDeleted++
+				}
+			}
+		}
+
+		// Delete chunk audio directories
+		audioDir := fmt.Sprintf("./audio/book_%d_segments", book.ID)
+		if err := os.RemoveAll(audioDir); err == nil {
+			log.Printf("🗑️ Deleted directory: %s", audioDir)
+		}
+	}
+
+	// Delete database records
+	tx := db.Begin()
+	if tx.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
+		return
+	}
+
+	// Delete playback progress
+	tx.Where("user_id = ?", userID).Delete(&PlaybackProgress{})
+
+	// Delete processed chunk groups
+	tx.Where("book_id IN (SELECT id FROM books WHERE user_id = ?)", userID).Delete(&ProcessedChunkGroup{})
+
+	// Delete TTS queue jobs
+	tx.Where("user_id = ?", userID).Delete(&TTSQueueJob{})
+
+	// Delete book chunks
+	result := tx.Where("book_id IN (SELECT id FROM books WHERE user_id = ?)", userID).Delete(&BookChunk{})
+	totalChunksDeleted = result.RowsAffected
+
+	// Delete books
+	result = tx.Where("user_id = ?", userID).Delete(&Book{})
+	totalBooksDeleted = result.RowsAffected
+
+	// Commit transaction
+	if err := tx.Commit().Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit deletion"})
+		return
+	}
+
+	log.Printf("🗑️ Deleted all files and data for user ID %d by admin", userID)
+	c.JSON(http.StatusOK, gin.H{
+		"message":           "User files deleted successfully",
+		"user_id":           userID,
+		"books_deleted":     totalBooksDeleted,
+		"chunks_deleted":    totalChunksDeleted,
+		"uploads_deleted":   uploadsDeleted,
+		"audio_deleted":     audioDeleted,
+		"covers_deleted":    coversDeleted,
+		"chunk_files_deleted": filesDeleted,
+	})
 }
 
 func getEnv(key, fallback string) string {
