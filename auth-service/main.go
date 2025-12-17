@@ -1217,25 +1217,25 @@ func getAdminStatsHandler(c *gin.Context) {
 		NewUsersThisWeek int64 `json:"new_users_this_week"`
 	}
 
-	// Total users
-	db.Model(&User{}).Count(&stats.TotalUsers)
+	// Total users (excluding admins)
+	db.Model(&User{}).Where("is_admin = ?", false).Count(&stats.TotalUsers)
 
-	// Paid users
-	db.Model(&User{}).Where("account_type = ?", "paid").Count(&stats.PaidUsers)
+	// Paid users (excluding admins)
+	db.Model(&User{}).Where("account_type = ? AND is_admin = ?", "paid", false).Count(&stats.PaidUsers)
 
-	// Free users
-	db.Model(&User{}).Where("account_type = ?", "free").Count(&stats.FreeUsers)
+	// Free users (excluding admins)
+	db.Model(&User{}).Where("account_type = ? AND is_admin = ?", "free", false).Count(&stats.FreeUsers)
 
-	// Active users in last 7 days
+	// Active users in last 7 days (excluding admins)
 	sevenDaysAgo := time.Now().AddDate(0, 0, -7)
-	db.Model(&User{}).Where("last_active_at >= ?", sevenDaysAgo).Count(&stats.ActiveUsers)
+	db.Model(&User{}).Where("last_active_at >= ? AND is_admin = ?", sevenDaysAgo, false).Count(&stats.ActiveUsers)
 
-	// New users today
+	// New users today (excluding admins)
 	today := time.Now().Truncate(24 * time.Hour)
-	db.Model(&User{}).Where("created_at >= ?", today).Count(&stats.NewUsersToday)
+	db.Model(&User{}).Where("created_at >= ? AND is_admin = ?", today, false).Count(&stats.NewUsersToday)
 
-	// New users this week
-	db.Model(&User{}).Where("created_at >= ?", sevenDaysAgo).Count(&stats.NewUsersThisWeek)
+	// New users this week (excluding admins)
+	db.Model(&User{}).Where("created_at >= ? AND is_admin = ?", sevenDaysAgo, false).Count(&stats.NewUsersThisWeek)
 
 	c.JSON(http.StatusOK, stats)
 }
@@ -1264,9 +1264,14 @@ func listUsersHandler(c *gin.Context) {
 	}
 
 	// Filter by admin status
+	// By default, exclude admins unless explicitly requested
 	if isAdmin := c.Query("is_admin"); isAdmin == "true" {
 		query = query.Where("is_admin = ?", true)
+	} else if isAdmin == "" {
+		// No filter specified - exclude admins by default
+		query = query.Where("is_admin = ?", false)
 	}
+	// If is_admin=false is explicitly set, show non-admin users (which is already the default)
 
 	// Search by username or email
 	if search := c.Query("search"); search != "" {
@@ -1321,18 +1326,18 @@ func getActiveUsersHandler(c *gin.Context) {
 	var activeUsers []ActiveUser
 	if err := db.Model(&User{}).
 		Select("id, username, email, account_type, last_active_at, books_read, EXTRACT(DAY FROM NOW() - last_active_at)::int as days_active").
-		Where("last_active_at >= ?", cutoffDate).
+		Where("last_active_at >= ? AND is_admin = ?", cutoffDate, false).
 		Order("last_active_at DESC").
 		Find(&activeUsers).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch active users"})
 		return
 	}
 
-	// Calculate activity stats
+	// Calculate activity stats (excluding admins)
 	var weeklyActive, dailyActive int64
 	oneDayAgo := time.Now().AddDate(0, 0, -1)
-	db.Model(&User{}).Where("last_active_at >= ?", cutoffDate).Count(&weeklyActive)
-	db.Model(&User{}).Where("last_active_at >= ?", oneDayAgo).Count(&dailyActive)
+	db.Model(&User{}).Where("last_active_at >= ? AND is_admin = ?", cutoffDate, false).Count(&weeklyActive)
+	db.Model(&User{}).Where("last_active_at >= ? AND is_admin = ?", oneDayAgo, false).Count(&dailyActive)
 
 	c.JSON(http.StatusOK, gin.H{
 		"active_users":        activeUsers,
