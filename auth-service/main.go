@@ -1419,52 +1419,105 @@ func wipeSystemHandler(c *gin.Context) {
 
 	log.Printf("🚨 SYSTEM WIPE initiated by admin user ID %d", adminUserID)
 
-	// Begin transaction for data consistency
+	// Step 1: Get all non-admin user IDs
+	var userIDs []uint
+	if err := db.Model(&User{}).Where("is_admin = ?", false).Pluck("id", &userIDs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user IDs"})
+		return
+	}
+
+	totalUsers := len(userIDs)
+	var adminUsers int64
+	db.Model(&User{}).Where("is_admin = ?", true).Count(&adminUsers)
+
+	log.Printf("🗑️ Deleting files for %d non-admin users...", totalUsers)
+
+	// Step 2: Delete files for each non-admin user via content-service
+	var filesDeletedCount int
+	contentServiceURL := os.Getenv("CONTENT_SERVICE_URL")
+	if contentServiceURL == "" {
+		contentServiceURL = "http://content-service:8083"
+	}
+
+	for _, userID := range userIDs {
+		// Forward DELETE request to content-service
+		url := fmt.Sprintf("%s/admin/users/%d/files", contentServiceURL, userID)
+		req, _ := http.NewRequest("DELETE", url, nil)
+
+		// Forward authorization header
+		authHeader := c.GetHeader("Authorization")
+		if authHeader != "" {
+			req.Header.Set("Authorization", authHeader)
+		}
+
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("⚠️ Warning: Failed to delete files for user %d: %v", userID, err)
+			continue
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			filesDeletedCount++
+		} else {
+			log.Printf("⚠️ Warning: Content service returned %d for user %d", resp.StatusCode, userID)
+		}
+	}
+
+	log.Printf("🗑️ Files deleted for %d/%d users", filesDeletedCount, totalUsers)
+
+	// Step 3: Delete database records in correct order (foreign key constraints)
 	tx := db.Begin()
 	if tx.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
 		return
 	}
 
-	// Count users before deletion
-	var totalUsers, adminUsers int64
-	tx.Model(&User{}).Where("is_admin = ?", false).Count(&totalUsers)
-	tx.Model(&User{}).Where("is_admin = ?", true).Count(&adminUsers)
+	// Delete UserBookHistory first (has FK to UserHistory)
+	var userHistoryIDs []uint
+	tx.Model(&UserHistory{}).Where("original_user_id IN ?", userIDs).Pluck("id", &userHistoryIDs)
 
-	// Delete user_book_histories for non-admin users
-	if err := tx.Where("user_id IN (SELECT id FROM users WHERE is_admin = false)").Delete(&UserBookHistory{}).Error; err != nil {
-		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user book histories"})
-		return
+	if len(userHistoryIDs) > 0 {
+		if err := tx.Where("user_history_id IN ?", userHistoryIDs).Delete(&UserBookHistory{}).Error; err != nil {
+			tx.Rollback()
+			log.Printf("❌ Failed to delete user book histories: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user book histories", "details": err.Error()})
+			return
+		}
 	}
 
-	// Delete user_histories for non-admin users
-	if err := tx.Where("user_id IN (SELECT id FROM users WHERE is_admin = false)").Delete(&UserHistory{}).Error; err != nil {
+	// Delete UserHistory
+	if err := tx.Where("original_user_id IN ?", userIDs).Delete(&UserHistory{}).Error; err != nil {
 		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user histories"})
+		log.Printf("❌ Failed to delete user histories: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user histories", "details": err.Error()})
 		return
 	}
 
 	// Delete all non-admin users
 	if err := tx.Where("is_admin = ?", false).Delete(&User{}).Error; err != nil {
 		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete users"})
+		log.Printf("❌ Failed to delete users: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete users", "details": err.Error()})
 		return
 	}
 
 	// Commit transaction
 	if err := tx.Commit().Error; err != nil {
+		log.Printf("❌ Failed to commit transaction: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit wipe operation"})
 		return
 	}
 
-	log.Printf("✅ SYSTEM WIPE completed: %d users deleted, %d admin accounts preserved", totalUsers, adminUsers)
+	log.Printf("✅ SYSTEM WIPE completed: %d users deleted, %d files deleted, %d admin accounts preserved", totalUsers, filesDeletedCount, adminUsers)
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":         "System wiped successfully",
-		"users_deleted":   totalUsers,
+		"message":          "System wiped successfully (files + database)",
+		"users_deleted":    totalUsers,
+		"files_deleted":    filesDeletedCount,
 		"admins_preserved": adminUsers,
-		"wiped_by_admin":  adminUserID,
+		"wiped_by_admin":   adminUserID,
 	})
 }
 
