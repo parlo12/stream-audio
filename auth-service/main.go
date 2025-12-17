@@ -386,6 +386,7 @@ func loginHandler(c *gin.Context) {
 	claims := jwt.MapClaims{
 		"username": user.Username,
 		"user_id":  user.ID,
+		"is_admin": user.IsAdmin,
 		"exp":      time.Now().Add(time.Hour * 72).Unix(),
 		"iat":      time.Now().Unix(),
 	}
@@ -1117,6 +1118,7 @@ func restoreAccountHandler(c *gin.Context) {
 	claims := jwt.MapClaims{
 		"username": restoredUser.Username,
 		"user_id":  restoredUser.ID,
+		"is_admin": restoredUser.IsAdmin,
 		"exp":      time.Now().Add(time.Hour * 72).Unix(),
 		"iat":      time.Now().Unix(),
 	}
