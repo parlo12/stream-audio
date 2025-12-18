@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -1753,68 +1754,38 @@ func deleteUserCompleteHandler(c *gin.Context) {
 // FILE TREE ENDPOINT
 // ============================================================================
 
-// getFileTreeHandler returns the directory tree structure for audio, covers, and uploads
+// getFileTreeHandler forwards the request to content-service which has access to the files
 // GET /admin/files/tree
 func getFileTreeHandler(c *gin.Context) {
-	// Base directory for all storage
-	baseDir := "/opt/stream-audio-data"
+	// Forward to content-service which has the volumes mounted
+	contentServiceURL := getEnv("CONTENT_SERVICE_URL", "http://content-service:8083")
 
-	// Allowed directories for file operations
-	allowedDirs := []string{"audio", "covers", "uploads"}
-
-	// Build tree for each allowed directory
-	trees := make(map[string]*FileTreeNode)
-	var totalSize int64
-	var totalFiles int
-
-	for _, dir := range allowedDirs {
-		dirPath := filepath.Join(baseDir, dir)
-
-		// Check if directory exists
-		if _, err := os.Stat(dirPath); os.IsNotExist(err) {
-			// Create empty node for missing directories
-			trees[dir] = &FileTreeNode{
-				Name:     dir,
-				Path:     dir,
-				IsDir:    true,
-				Children: []*FileTreeNode{},
-			}
-			continue
-		}
-
-		// Build the tree for this directory
-		tree, err := buildFileTree(dirPath, "")
-		if err != nil {
-			log.Printf("Warning: Failed to build tree for %s: %v", dir, err)
-			trees[dir] = &FileTreeNode{
-				Name:     dir,
-				Path:     dir,
-				IsDir:    true,
-				Children: []*FileTreeNode{},
-			}
-			continue
-		}
-
-		// Update the name and path to be the directory name
-		tree.Name = dir
-		tree.Path = dir
-		trees[dir] = tree
-
-		// Calculate stats for this directory
-		dirSize, dirFiles := calculateTreeStats(tree)
-		totalSize += dirSize
-		totalFiles += dirFiles
+	req, err := http.NewRequest("GET", contentServiceURL+"/admin/files/tree", nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create request"})
+		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"trees":       trees,
-		"root":        baseDir,
-		"directories": allowedDirs,
-		"stats": gin.H{
-			"totalSize":  totalSize,
-			"totalFiles": totalFiles,
-		},
-	})
+	// Forward the authorization header
+	req.Header.Set("Authorization", c.GetHeader("Authorization"))
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Failed to forward file tree request to content-service: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reach content service"})
+		return
+	}
+	defer resp.Body.Close()
+
+	// Read and forward the response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read response"})
+		return
+	}
+
+	c.Data(resp.StatusCode, "application/json", body)
 }
 
 // buildFileTree recursively builds a file tree structure

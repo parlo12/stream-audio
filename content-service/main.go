@@ -193,6 +193,7 @@ func main() {
 	{
 		admin.DELETE("/users/:user_id/files", deleteUserFilesContentHandler)
 		admin.DELETE("/files/delete", deleteFileContentHandler)
+		admin.GET("/files/tree", getFileTreeContentHandler)
 	}
 
 	for _, r := range router.Routes() {
@@ -946,9 +947,22 @@ func deleteFileContentHandler(c *gin.Context) {
 		return
 	}
 
-	// Construct full path based on base directory
-	baseDir := "/opt/stream-audio-data"
-	fullPath := baseDir + "/" + req.FilePath
+	// Map the relative path to actual container paths
+	// In Docker: audio/ → ./audio/, covers/ → ./uploads/covers/, uploads/ → ./uploads/
+	var fullPath string
+	switch {
+	case strings.HasPrefix(req.FilePath, "audio/"):
+		fullPath = "./" + req.FilePath // ./audio/filename
+	case strings.HasPrefix(req.FilePath, "covers/"):
+		// covers/filename → ./uploads/covers/filename
+		filename := strings.TrimPrefix(req.FilePath, "covers/")
+		fullPath = "./uploads/covers/" + filename
+	case strings.HasPrefix(req.FilePath, "uploads/"):
+		fullPath = "./" + req.FilePath // ./uploads/filename
+	default:
+		c.JSON(http.StatusForbidden, gin.H{"error": "Invalid file path"})
+		return
+	}
 
 	// Check if file exists
 	info, err := os.Stat(fullPath)
@@ -995,4 +1009,145 @@ func deleteFileContentHandler(c *gin.Context) {
 		"file_path":   req.FilePath,
 		"size_deleted": fileSize,
 	})
+}
+
+// FileTreeNode represents a file or directory in the tree structure
+type FileTreeNode struct {
+	Name     string          `json:"name"`
+	Path     string          `json:"path"`
+	IsDir    bool            `json:"is_dir"`
+	Size     int64           `json:"size,omitempty"`
+	Children []*FileTreeNode `json:"children,omitempty"`
+}
+
+// getFileTreeContentHandler returns the directory tree structure for audio, covers, and uploads
+// GET /admin/files/tree
+func getFileTreeContentHandler(c *gin.Context) {
+	// Directory mappings in Docker container
+	// Host /opt/stream-audio-data/audio → Container ./audio
+	// Host /opt/stream-audio-data/covers → Container ./uploads/covers
+	// Host /opt/stream-audio-data/uploads → Container ./uploads
+	dirMappings := map[string]string{
+		"audio":   "./audio",
+		"covers":  "./uploads/covers",
+		"uploads": "./uploads",
+	}
+
+	trees := make(map[string]*FileTreeNode)
+	var totalSize int64
+	var totalFiles int
+
+	for displayName, containerPath := range dirMappings {
+		// Check if directory exists
+		if _, err := os.Stat(containerPath); os.IsNotExist(err) {
+			// Create empty node for missing directories
+			trees[displayName] = &FileTreeNode{
+				Name:     displayName,
+				Path:     displayName,
+				IsDir:    true,
+				Children: []*FileTreeNode{},
+			}
+			continue
+		}
+
+		// Build the tree for this directory
+		tree, err := buildFileTreeContent(containerPath, "")
+		if err != nil {
+			log.Printf("Warning: Failed to build tree for %s: %v", displayName, err)
+			trees[displayName] = &FileTreeNode{
+				Name:     displayName,
+				Path:     displayName,
+				IsDir:    true,
+				Children: []*FileTreeNode{},
+			}
+			continue
+		}
+
+		// Update the name and path to be the display name
+		tree.Name = displayName
+		tree.Path = displayName
+		trees[displayName] = tree
+
+		// Calculate stats for this directory
+		dirSize, dirFiles := calculateTreeStatsContent(tree)
+		totalSize += dirSize
+		totalFiles += dirFiles
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"trees":       trees,
+		"directories": []string{"audio", "covers", "uploads"},
+		"stats": gin.H{
+			"totalSize":  totalSize,
+			"totalFiles": totalFiles,
+		},
+	})
+}
+
+// buildFileTreeContent recursively builds a file tree structure
+func buildFileTreeContent(basePath string, relativePath string) (*FileTreeNode, error) {
+	fullPath := basePath
+	if relativePath != "" {
+		fullPath = basePath + "/" + relativePath
+	}
+
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		return nil, err
+	}
+
+	node := &FileTreeNode{
+		Name:  info.Name(),
+		Path:  relativePath,
+		IsDir: info.IsDir(),
+	}
+
+	if !info.IsDir() {
+		node.Size = info.Size()
+		return node, nil
+	}
+
+	// Read directory contents
+	entries, err := os.ReadDir(fullPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build children
+	node.Children = make([]*FileTreeNode, 0, len(entries))
+	for _, entry := range entries {
+		var childPath string
+		if relativePath == "" {
+			childPath = entry.Name()
+		} else {
+			childPath = relativePath + "/" + entry.Name()
+		}
+
+		childNode, err := buildFileTreeContent(basePath, childPath)
+		if err != nil {
+			log.Printf("Warning: Failed to process %s: %v", childPath, err)
+			continue
+		}
+		node.Children = append(node.Children, childNode)
+	}
+
+	return node, nil
+}
+
+// calculateTreeStatsContent calculates total size and file count for a tree
+func calculateTreeStatsContent(node *FileTreeNode) (int64, int) {
+	if !node.IsDir {
+		return node.Size, 1
+	}
+
+	var totalSize int64
+	var totalFiles int
+
+	for _, child := range node.Children {
+		size, files := calculateTreeStatsContent(child)
+		totalSize += size
+		totalFiles += files
+	}
+
+	return totalSize, totalFiles
 }
