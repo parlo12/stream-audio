@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -142,6 +144,15 @@ type RestoreAccountRequest struct {
 	DeviceID    string `json:"device_id"`
 }
 
+// FileTreeNode represents a file or directory in the tree
+type FileTreeNode struct {
+	Name     string          `json:"name"`
+	Path     string          `json:"path"`
+	IsDir    bool            `json:"isDir"`
+	Size     int64           `json:"size,omitempty"`
+	Children []*FileTreeNode `json:"children,omitempty"`
+}
+
 func main() {
 	// Initialize the database connection and run migrations
 	setupDatabase()
@@ -191,6 +202,9 @@ func main() {
 		admin.GET("/users", listUsersHandler)
 		admin.GET("/users/active", getActiveUsersHandler)
 		admin.POST("/users/:user_id/admin", makeUserAdminHandler)
+
+		// File tree endpoint
+		admin.GET("/files/tree", getFileTreeHandler)
 
 		// Maintenance endpoints
 		admin.POST("/system/wipe", wipeSystemHandler)
@@ -1724,4 +1738,82 @@ func deleteUserCompleteHandler(c *gin.Context) {
 		"username": user.Username,
 		"email":    user.Email,
 	})
+}
+
+// ============================================================================
+// FILE TREE ENDPOINT
+// ============================================================================
+
+// getFileTreeHandler returns the directory tree structure for audio files
+// GET /admin/files/tree
+func getFileTreeHandler(c *gin.Context) {
+	// Base audio directory
+	audioDir := "/opt/stream-audio-data/audio"
+
+	// Check if directory exists
+	if _, err := os.Stat(audioDir); os.IsNotExist(err) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Audio directory not found"})
+		return
+	}
+
+	// Build the tree
+	tree, err := buildFileTree(audioDir, "")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to build file tree: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"tree": tree,
+		"root": audioDir,
+	})
+}
+
+// buildFileTree recursively builds a file tree structure
+func buildFileTree(basePath string, relativePath string) (*FileTreeNode, error) {
+	fullPath := filepath.Join(basePath, relativePath)
+
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		return nil, err
+	}
+
+	node := &FileTreeNode{
+		Name:  info.Name(),
+		Path:  relativePath,
+		IsDir: info.IsDir(),
+	}
+
+	if !info.IsDir() {
+		node.Size = info.Size()
+		return node, nil
+	}
+
+	// Read directory contents
+	entries, err := os.ReadDir(fullPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build children
+	node.Children = make([]*FileTreeNode, 0, len(entries))
+	for _, entry := range entries {
+		childPath := filepath.Join(relativePath, entry.Name())
+		child, err := buildFileTree(basePath, childPath)
+		if err != nil {
+			log.Printf("Warning: Failed to process %s: %v", childPath, err)
+			continue
+		}
+		node.Children = append(node.Children, child)
+	}
+
+	// Sort children: directories first, then files, alphabetically
+	sort.Slice(node.Children, func(i, j int) bool {
+		if node.Children[i].IsDir != node.Children[j].IsDir {
+			return node.Children[i].IsDir
+		}
+		return node.Children[i].Name < node.Children[j].Name
+	})
+
+	return node, nil
 }
