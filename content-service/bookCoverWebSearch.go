@@ -175,12 +175,31 @@ Return ONLY the direct image URL on a single line. Do not include any explanatio
 // URL regex pattern for extracting URLs from text
 var urlRegex = regexp.MustCompile(`https?://[^\s\)\]"'<>]+`)
 
-// isImageURL checks if a URL points to an image
+// isImageURL checks if a URL points to a direct image (not a wiki page)
 func isImageURL(url string) bool {
 	urlLower := strings.ToLower(url)
+
+	// Exclude wiki page URLs that contain image filenames but aren't direct images
+	// e.g., https://commons.wikimedia.org/wiki/File:image.jpg is a PAGE, not an image
+	excludePatterns := []string{
+		"/wiki/file:",
+		"/wiki/file%3a",
+		"index.php/file:",
+		"index.php/file%3a",
+	}
+	for _, pattern := range excludePatterns {
+		if strings.Contains(urlLower, pattern) {
+			return false
+		}
+	}
+
+	// Check for direct image URLs
 	imageExtensions := []string{".jpg", ".jpeg", ".png", ".webp", ".gif"}
 	for _, ext := range imageExtensions {
-		if strings.Contains(urlLower, ext) {
+		// Must end with the extension or have it followed by query params
+		if strings.HasSuffix(urlLower, ext) ||
+		   strings.Contains(urlLower, ext+"?") ||
+		   strings.Contains(urlLower, ext+"&") {
 			return true
 		}
 	}
@@ -313,8 +332,20 @@ func truncateString(s string, maxLen int) string {
 // downloadAndSaveImage downloads an image from a URL and saves it to the local filesystem
 // Returns the local file path and any error encountered
 func downloadAndSaveImage(imageURL, bookID string) (string, error) {
-	// Download the image
-	resp, err := http.Get(imageURL)
+	// Create request with proper headers to avoid 403 errors
+	req, err := http.NewRequest("GET", imageURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Set headers to mimic a browser request
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Referer", "https://www.google.com/")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to download image: %w", err)
 	}
@@ -370,25 +401,94 @@ func downloadAndSaveImage(imageURL, bookID string) (string, error) {
 	return filePath, nil
 }
 
+// tryOpenLibraryCover attempts to get a book cover from Open Library's API
+// This is a reliable fallback as Open Library provides direct image URLs
+func tryOpenLibraryCover(title, author string) string {
+	// Clean title for URL
+	cleanTitle := strings.ReplaceAll(title, " ", "+")
+	cleanAuthor := strings.ReplaceAll(author, " ", "+")
+
+	// Try Open Library search API to get the book's OLID
+	searchURL := fmt.Sprintf("https://openlibrary.org/search.json?title=%s&author=%s&limit=1", cleanTitle, cleanAuthor)
+
+	req, err := http.NewRequest("GET", searchURL, nil)
+	if err != nil {
+		log.Printf("⚠️ Open Library search request failed: %v", err)
+		return ""
+	}
+	req.Header.Set("User-Agent", "StreamAudio/1.0 (book cover fetcher)")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("⚠️ Open Library search failed: %v", err)
+		return ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	var searchResult struct {
+		Docs []struct {
+			CoverI int `json:"cover_i"`
+		} `json:"docs"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&searchResult); err != nil {
+		return ""
+	}
+
+	if len(searchResult.Docs) > 0 && searchResult.Docs[0].CoverI > 0 {
+		// Open Library cover URL - L = large size
+		coverURL := fmt.Sprintf("https://covers.openlibrary.org/b/id/%d-L.jpg", searchResult.Docs[0].CoverI)
+		log.Printf("📚 Found Open Library cover: %s", coverURL)
+		return coverURL
+	}
+
+	return ""
+}
+
 // fetchAndSaveBookCover is the main entry point for fetching and saving a book cover
 // It searches the web for the cover, downloads it, and returns the local path and public URL
 func fetchAndSaveBookCover(title, author, bookID string) (localPath string, publicURL string, err error) {
-	// Step 1: Search for the book cover
-	imageURL, err := fetchBookCoverFromWeb(title, author)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to find book cover: %w", err)
+	var imageURL string
+	var downloadErr error
+
+	// Step 1: Try OpenAI web search first
+	imageURL, err = fetchBookCoverFromWeb(title, author)
+	if err == nil && imageURL != "" {
+		// Try to download the found image
+		localPath, downloadErr = downloadAndSaveImage(imageURL, bookID)
+		if downloadErr == nil {
+			// Success!
+			host := getEnv("STREAM_HOST", "http://localhost:8083")
+			filename := filepath.Base(localPath)
+			publicURL = fmt.Sprintf("%s/covers/%s", host, filename)
+			return localPath, publicURL, nil
+		}
+		log.Printf("⚠️ Failed to download from OpenAI result: %v, trying Open Library fallback...", downloadErr)
+	} else {
+		log.Printf("⚠️ OpenAI search failed: %v, trying Open Library fallback...", err)
 	}
 
-	// Step 2: Download and save the image
-	localPath, err = downloadAndSaveImage(imageURL, bookID)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to download image: %w", err)
+	// Step 2: Fallback to Open Library
+	imageURL = tryOpenLibraryCover(title, author)
+	if imageURL != "" {
+		localPath, downloadErr = downloadAndSaveImage(imageURL, bookID)
+		if downloadErr == nil {
+			host := getEnv("STREAM_HOST", "http://localhost:8083")
+			filename := filepath.Base(localPath)
+			publicURL = fmt.Sprintf("%s/covers/%s", host, filename)
+			return localPath, publicURL, nil
+		}
+		log.Printf("⚠️ Failed to download from Open Library: %v", downloadErr)
 	}
 
-	// Step 3: Generate public URL
-	host := getEnv("STREAM_HOST", "http://localhost:8083")
-	filename := filepath.Base(localPath)
-	publicURL = fmt.Sprintf("%s/covers/%s", host, filename)
-
-	return localPath, publicURL, nil
+	// Both methods failed
+	if downloadErr != nil {
+		return "", "", fmt.Errorf("failed to download image: %w", downloadErr)
+	}
+	return "", "", fmt.Errorf("no valid book cover found")
 }
