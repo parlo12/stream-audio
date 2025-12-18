@@ -115,7 +115,7 @@ func main() {
 
 	// Health check/root response
 	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"message": "Auth service is running at https://68.183.22.205:8083/health"})
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "content-service"})
 	})
 
 	// Insanaty check for MQTT

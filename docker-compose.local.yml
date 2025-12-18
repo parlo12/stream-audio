@@ -1,0 +1,103 @@
+# docker-compose.local.yml - For local development on macOS/Windows
+# Usage: docker compose -f docker-compose.local.yml up -d
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER:-rolf}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-your_password}
+      POSTGRES_DB: ${DB_NAME:-streaming_db}
+    ports: ["5433:5432"]  # External port 5433 to avoid conflicts
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-rolf}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    ports: ["6380:6379"]  # External port 6380 to avoid conflicts
+    volumes:
+      - redis_data:/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: auth-service/Dockerfile
+    restart: always
+    env_file: .env
+    environment:
+      GIN_MODE: "debug"
+      DB_SSLMODE: "disable"
+      PGSSLMODE: "disable"
+      DB_HOST: "postgres"
+      DB_PORT: "5432"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    ports: ["8082:8082"]
+    volumes:
+      - ./logs/auth:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  content-service:
+    build:
+      context: .
+      dockerfile: content-service/Dockerfile
+    restart: always
+    env_file: .env
+    environment:
+      GIN_MODE: "debug"
+      DB_SSLMODE: "disable"
+      PGSSLMODE: "disable"
+      DB_HOST: "postgres"
+      DB_PORT: "5432"
+      AUTH_SERVICE_URL: "http://auth-service:8082"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      AUDIO_STORAGE_PATH: "/app/audio"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      auth-service:
+        condition: service_started
+    ports: ["8083:8083"]
+    volumes:
+      - content-audio-persistent:/app/audio
+      - content-covers-persistent:/app/uploads/covers
+      - ./logs/content:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  # Docker-managed volumes for local development (no bind mounts required)
+  postgres_data:
+  redis_data:
+  content-audio-persistent:
+  content-covers-persistent:
+
+networks:
+  default:
+    name: stream-audio-local-network

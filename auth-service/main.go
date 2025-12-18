@@ -474,8 +474,8 @@ func createCheckoutSessionHandler(c *gin.Context) {
 				Quantity: stripe.Int64(1),
 			},
 		},
-		SuccessURL: stripe.String("http://68.183.22.205/thank-you-page"),
-		CancelURL:  stripe.String("http://68.183.22.205/cancel"),
+		SuccessURL: stripe.String(getEnv("STRIPE_SUCCESS_URL", "https://narrafied.com/thank-you-page")),
+		CancelURL:  stripe.String(getEnv("STRIPE_CANCEL_URL", "https://narrafied.com/cancel")),
 	}
 	s, err := session.New(params)
 	if err != nil {

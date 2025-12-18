@@ -1,0 +1,15 @@
+# Restart broker
+cd /opt/mqtt
+docker compose restart
+------------------------------------------
+Use the same command but omit the service name so Compose brings up everything in the file:
+docker compose -f docker-compose.prod.yml up -d --force-recreate
+-----------------------------------------------
+If you also want to rebuild images while starting everything:
+docker compose -f docker-compose.prod.yml up -d --build --force-recreate
+-------------------------------------------------
+# See container status
+docker compose -f docker-compose.prod.yml ps
+
+# Tail all logs
+docker compose -f docker-compose.prod.yml logs -f
