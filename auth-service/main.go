@@ -501,13 +501,19 @@ func stripeWebhookHandler(c *gin.Context) {
 
 	endpointSecret := getEnv("STRIPE_WEBHOOK_SECRET", "")
 	sigHeader := c.GetHeader("Stripe-Signature")
-	event, err := webhook.ConstructEvent(payload, sigHeader, endpointSecret)
+
+	// Use ConstructEventWithOptions to ignore API version mismatch
+	event, err := webhook.ConstructEventWithOptions(payload, sigHeader, endpointSecret, webhook.ConstructEventOptions{
+		IgnoreAPIVersionMismatch: true,
+	})
 
 	if err != nil {
 		log.Printf("⚠️ Webhook signature verification failed: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Signature verification failded"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Signature verification failed"})
 		return
 	}
+
+	log.Printf("✅ Webhook received: %s", event.Type)
 
 	switch event.Type {
 
