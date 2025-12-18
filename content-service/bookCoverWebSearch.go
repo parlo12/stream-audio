@@ -332,54 +332,91 @@ func truncateString(s string, maxLen int) string {
 // downloadAndSaveImage downloads an image from a URL and saves it to the local filesystem
 // Returns the local file path and any error encountered
 func downloadAndSaveImage(imageURL, bookID string) (string, error) {
-	// Create request with proper headers to avoid 403 errors
-	req, err := http.NewRequest("GET", imageURL, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
+	// Try different referer strategies to bypass hotlink protection
+	referers := []string{
+		"", // No referer first (some sites prefer this)
+		"https://www.google.com/",
+		getURLHost(imageURL), // Same-origin referer
 	}
 
-	// Set headers to mimic a browser request
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("Referer", "https://www.google.com/")
+	var lastErr error
+	for _, referer := range referers {
+		req, err := http.NewRequest("GET", imageURL, nil)
+		if err != nil {
+			return "", fmt.Errorf("failed to create request: %w", err)
+		}
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to download image: %w", err)
+		// Set headers to mimic a browser request
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+		req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+		if referer != "" {
+			req.Header.Set("Referer", referer)
+		}
+
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to download image: %w", err)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("failed to download image: HTTP status %d", resp.StatusCode)
+			continue
+		}
+
+		// Success - read the body
+		imageData, err := readAndValidateImage(resp)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		// Save the image
+		return saveImageToFile(imageData, imageURL, bookID)
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("failed to download image: HTTP status %d", resp.StatusCode)
+	return "", lastErr
+}
+
+// getURLHost extracts the host from a URL to use as referer
+func getURLHost(urlStr string) string {
+	// Simple extraction: https://example.com/path -> https://example.com/
+	if idx := strings.Index(urlStr, "://"); idx != -1 {
+		rest := urlStr[idx+3:]
+		if slashIdx := strings.Index(rest, "/"); slashIdx != -1 {
+			return urlStr[:idx+3+slashIdx+1]
+		}
 	}
+	return urlStr
+}
 
-	// Read image data
+// readAndValidateImage reads image data from response and validates it
+func readAndValidateImage(resp *http.Response) ([]byte, error) {
 	imageData, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed to read image data: %w", err)
+		return nil, fmt.Errorf("failed to read image data: %w", err)
 	}
 
 	// Validate minimum image size (should be at least a few KB for a real cover)
 	if len(imageData) < 5000 {
-		return "", fmt.Errorf("downloaded image is too small (%d bytes), likely invalid", len(imageData))
+		return nil, fmt.Errorf("downloaded image is too small (%d bytes), likely invalid", len(imageData))
 	}
 
-	// Determine file extension from URL or Content-Type
+	return imageData, nil
+}
+
+// saveImageToFile saves image data to a file and returns the path
+func saveImageToFile(imageData []byte, imageURL, bookID string) (string, error) {
+	// Determine file extension from URL
 	ext := ".jpg"
-	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
-		switch contentType {
-		case "image/png":
-			ext = ".png"
-		case "image/jpeg", "image/jpg":
-			ext = ".jpg"
-		}
-	} else {
-		// Fallback: detect from URL
-		if strings.Contains(strings.ToLower(imageURL), ".png") {
-			ext = ".png"
-		}
+	if strings.Contains(strings.ToLower(imageURL), ".png") {
+		ext = ".png"
+	} else if strings.Contains(strings.ToLower(imageURL), ".webp") {
+		ext = ".webp"
 	}
 
 	// Create uploads/covers directory if it doesn't exist
