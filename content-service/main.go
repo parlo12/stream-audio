@@ -192,6 +192,7 @@ func main() {
 	admin.Use(authMiddleware(), adminMiddleware())
 	{
 		admin.DELETE("/users/:user_id/files", deleteUserFilesContentHandler)
+		admin.DELETE("/files/delete", deleteFileContentHandler)
 	}
 
 	for _, r := range router.Routes() {
@@ -905,4 +906,93 @@ func getEnv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// deleteFileContentHandler deletes a single file from the server
+// DELETE /admin/files/delete
+// Body: { "file_path": "audio/book_21_chunk_5.mp3" }
+func deleteFileContentHandler(c *gin.Context) {
+	type DeleteFileRequest struct {
+		FilePath string `json:"file_path" binding:"required"`
+	}
+
+	var req DeleteFileRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file_path is required"})
+		return
+	}
+
+	// Security: Validate that the path is within allowed directories
+	allowedPrefixes := []string{"audio/", "covers/", "uploads/"}
+	isAllowed := false
+	for _, prefix := range allowedPrefixes {
+		if strings.HasPrefix(req.FilePath, prefix) {
+			isAllowed = true
+			break
+		}
+	}
+
+	if !isAllowed {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "Invalid file path",
+			"message": "File must be in audio/, covers/, or uploads/ directory",
+		})
+		return
+	}
+
+	// Security: Prevent path traversal attacks
+	if strings.Contains(req.FilePath, "..") {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Invalid file path: path traversal not allowed"})
+		return
+	}
+
+	// Construct full path based on base directory
+	baseDir := "/opt/stream-audio-data"
+	fullPath := baseDir + "/" + req.FilePath
+
+	// Check if file exists
+	info, err := os.Stat(fullPath)
+	if os.IsNotExist(err) {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":     "File not found",
+			"file_path": req.FilePath,
+		})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to check file",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	// Don't allow deleting directories
+	if info.IsDir() {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "Cannot delete directories",
+			"message": "Only individual files can be deleted",
+		})
+		return
+	}
+
+	// Get file size before deletion for reporting
+	fileSize := info.Size()
+
+	// Delete the file
+	if err := os.Remove(fullPath); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to delete file",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	log.Printf("🗑️ Admin deleted file: %s (%.2f KB)", req.FilePath, float64(fileSize)/1024)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":     "File deleted successfully",
+		"file_path":   req.FilePath,
+		"size_deleted": fileSize,
+	})
 }

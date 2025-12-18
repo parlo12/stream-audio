@@ -206,6 +206,9 @@ func main() {
 		// File tree endpoint
 		admin.GET("/files/tree", getFileTreeHandler)
 
+		// Individual file delete endpoint
+		admin.DELETE("/files/delete", deleteFileHandler)
+
 		// Maintenance endpoints
 		admin.POST("/system/wipe", wipeSystemHandler)
 		admin.DELETE("/users/:user_id/files", deleteUserFilesHandler)
@@ -1880,4 +1883,81 @@ func calculateTreeStats(node *FileTreeNode) (totalSize int64, totalFiles int) {
 	}
 
 	return totalSize, totalFiles
+}
+
+// deleteFileHandler deletes a single file from the server
+// DELETE /admin/files/delete
+// Body: { "file_path": "audio/book_21_chunk_5.mp3" }
+func deleteFileHandler(c *gin.Context) {
+	type DeleteFileRequest struct {
+		FilePath string `json:"file_path" binding:"required"`
+	}
+
+	var req DeleteFileRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file_path is required"})
+		return
+	}
+
+	// Security: Validate that the path is within allowed directories
+	allowedPrefixes := []string{"audio/", "covers/", "uploads/"}
+	isAllowed := false
+	for _, prefix := range allowedPrefixes {
+		if strings.HasPrefix(req.FilePath, prefix) {
+			isAllowed = true
+			break
+		}
+	}
+
+	if !isAllowed {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "Invalid file path",
+			"message": "File must be in audio/, covers/, or uploads/ directory",
+		})
+		return
+	}
+
+	// Security: Prevent path traversal attacks
+	if strings.Contains(req.FilePath, "..") {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Invalid file path: path traversal not allowed"})
+		return
+	}
+
+	// Forward request to content-service
+	contentServiceURL := os.Getenv("CONTENT_SERVICE_URL")
+	if contentServiceURL == "" {
+		contentServiceURL = "http://content-service:8083"
+	}
+
+	deleteURL := fmt.Sprintf("%s/admin/files/delete", contentServiceURL)
+
+	// Create request body
+	jsonBody, _ := json.Marshal(req)
+	httpReq, err := http.NewRequest("DELETE", deleteURL, strings.NewReader(string(jsonBody)))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create request"})
+		return
+	}
+
+	// Forward authorization header
+	authHeader := c.GetHeader("Authorization")
+	httpReq.Header.Set("Authorization", authHeader)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to contact content service", "details": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+
+	// Parse response from content-service
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decode response"})
+		return
+	}
+
+	c.JSON(resp.StatusCode, result)
 }
