@@ -8,13 +8,14 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"errors"
-	"fmt"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -102,8 +103,41 @@ func uploadBookFileHandler(c *gin.Context) {
 		return
 	}
 
-	// Chunk (paginate) the document
-	numPages, err := ChunkDocument(book.ID, dest)
+	// Check file size to determine sync vs async processing
+	fileInfo, _ := os.Stat(dest)
+	fileSizeBytes := fileInfo.Size()
+	fileSizeMB := float64(fileSizeBytes) / (1024 * 1024)
+
+	// Large files (> 5MB or estimated > 1000 chunks) use async processing
+	estimatedChunks := int(fileSizeBytes / 1000)
+	usesAsync := fileSizeMB > 5 || estimatedChunks > 1000
+
+	if usesAsync {
+		// Async processing for large books - returns immediately
+		log.Printf("📚 Large book detected (%.2f MB, ~%d chunks), using async processing", fileSizeMB, estimatedChunks)
+
+		estimatedPages, err := ChunkDocumentAsync(book.ID, dest)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start document processing", "details": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusAccepted, gin.H{
+			"message":          "File uploaded, chunking in progress (large file)",
+			"book_id":          book.ID,
+			"estimated_pages":  estimatedPages,
+			"file_path":        dest,
+			"content_hash":     hash,
+			"status":           "chunking",
+			"async":            true,
+			"file_size_mb":     fileSizeMB,
+			"note":             "Poll GET /user/books/{book_id} to check status. Status will be 'pending' when chunking is complete.",
+		})
+		return
+	}
+
+	// Sync processing for smaller books (uses batch inserts for efficiency)
+	numPages, err := ChunkDocumentBatch(book.ID, dest)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to paginate document", "details": err.Error()})
 		return
@@ -123,6 +157,7 @@ func uploadBookFileHandler(c *gin.Context) {
 		"file_path":    dest,
 		"content_hash": hash,
 		"page_indices": len(actualChunks),
+		"async":        false,
 	})
 
 	// 🔍 Debugging: Check if page 11 (index 10) exists
