@@ -285,6 +285,11 @@ func extractImageURLFromResponse(response *ResponsesAPIResponse) string {
 		if url != "" {
 			return url
 		}
+		// Also check for known CDN URLs
+		url = extractCDNURLFromText(response.OutputText)
+		if url != "" {
+			return url
+		}
 	}
 
 	// Otherwise, parse the output items
@@ -292,7 +297,14 @@ func extractImageURLFromResponse(response *ResponsesAPIResponse) string {
 		if item.Type == "message" && len(item.Content) > 0 {
 			for _, content := range item.Content {
 				if content.Type == "output_text" && content.Text != "" {
+					log.Printf("📝 Parsing message content: %s...", truncateString(content.Text, 200))
+
 					url := extractURLFromText(content.Text)
+					if url != "" {
+						return url
+					}
+					// Also check for known CDN URLs
+					url = extractCDNURLFromText(content.Text)
 					if url != "" {
 						return url
 					}
@@ -301,8 +313,9 @@ func extractImageURLFromResponse(response *ResponsesAPIResponse) string {
 				// Also check annotations for URLs
 				for _, annotation := range content.Annotations {
 					if annotation.Type == "url_citation" && annotation.URL != "" {
-						// Check if this URL is an image
-						if isImageURL(annotation.URL) {
+						log.Printf("📎 Found annotation URL: %s", annotation.URL)
+						// Check if this URL is an image or from a known CDN
+						if isImageURL(annotation.URL) || isKnownImageCDN(annotation.URL) {
 							return annotation.URL
 						}
 					}
@@ -312,9 +325,13 @@ func extractImageURLFromResponse(response *ResponsesAPIResponse) string {
 
 		// Check sources from web_search_call actions
 		if item.Type == "web_search_call" && item.Action != nil {
+			log.Printf("🔍 Found %d web search sources", len(item.Action.Sources))
 			for _, source := range item.Action.Sources {
-				if source.URL != "" && isImageURL(source.URL) {
-					return source.URL
+				if source.URL != "" {
+					log.Printf("   Source URL: %s", truncateString(source.URL, 100))
+					if isImageURL(source.URL) || isKnownImageCDN(source.URL) {
+						return source.URL
+					}
 				}
 			}
 		}
@@ -322,6 +339,66 @@ func extractImageURLFromResponse(response *ResponsesAPIResponse) string {
 
 	return ""
 }
+
+// truncateString truncates a string to maxLen characters
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+// extractCDNURLFromText finds URLs from known book cover CDNs in text
+func extractCDNURLFromText(text string) string {
+	cdnPatterns := []string{
+		"images-na.ssl-images-amazon.com",
+		"m.media-amazon.com",
+		"images.gr-assets.com",
+		"i.gr-assets.com",
+		"books.google.com",
+		"covers.openlibrary.org",
+		"prodimage.images-bn.com",
+	}
+
+	for _, cdn := range cdnPatterns {
+		idx := -1
+		for i := 0; i <= len(text)-len(cdn); i++ {
+			if text[i:i+len(cdn)] == cdn {
+				idx = i
+				break
+			}
+		}
+		if idx == -1 {
+			continue
+		}
+
+		// Find the start of the URL (look backwards for http)
+		start := idx
+		for start > 0 && !(text[start:start+4] == "http") {
+			start--
+		}
+
+		// Find the end of the URL
+		end := idx + len(cdn)
+		for end < len(text) {
+			c := text[end]
+			if c == ' ' || c == '\n' || c == '\r' || c == '"' || c == '\'' || c == ')' || c == ']' || c == '>' {
+				break
+			}
+			end++
+		}
+
+		if start >= 0 && end > start {
+			url := text[start:end]
+			if len(url) > 10 { // basic validation
+				return url
+			}
+		}
+	}
+
+	return ""
+}
+
 
 // downloadAndSaveImage downloads an image from a URL and saves it to the local filesystem
 // Returns the local file path and any error encountered
