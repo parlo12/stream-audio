@@ -36,6 +36,9 @@ func main() {
 	// also proxy any /auth/... paths (to catch /auth/register, etc.)
 	router.Any("/auth/*proxyPath", wrapProxy(authProxy))
 
+	// proxy Stripe webhook to auth-service (for payment processing)
+	router.POST("/stripe/webhook", wrapProxy(authProxy))
+
 	// proxy content endpoints
 	router.Any("/content/*proxyPath", wrapProxy(contentProxy))
 
