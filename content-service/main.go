@@ -175,6 +175,10 @@ func main() {
 		// Book search/discovery endpoint - AI-powered book suggestions
 		authorized.POST("/search-books", SearchBooksHandler)
 
+		// Book cover search and selection endpoints
+		authorized.POST("/search-book-covers", SearchBookCoversHandler)
+		authorized.POST("/books/:book_id/select-cover", SelectBookCoverHandler)
+
 		// Playback progress tracking endpoints
 		authorized.POST("/books/:book_id/progress", UpdatePlaybackProgressHandler)   // Update progress
 		authorized.GET("/books/:book_id/progress", GetPlaybackProgressHandler)       // Get progress for a book
