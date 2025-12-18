@@ -1744,28 +1744,67 @@ func deleteUserCompleteHandler(c *gin.Context) {
 // FILE TREE ENDPOINT
 // ============================================================================
 
-// getFileTreeHandler returns the directory tree structure for audio files
+// getFileTreeHandler returns the directory tree structure for audio, covers, and uploads
 // GET /admin/files/tree
 func getFileTreeHandler(c *gin.Context) {
-	// Base audio directory
-	audioDir := "/opt/stream-audio-data/audio"
+	// Base directory for all storage
+	baseDir := "/opt/stream-audio-data"
 
-	// Check if directory exists
-	if _, err := os.Stat(audioDir); os.IsNotExist(err) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Audio directory not found"})
-		return
-	}
+	// Allowed directories for file operations
+	allowedDirs := []string{"audio", "covers", "uploads"}
 
-	// Build the tree
-	tree, err := buildFileTree(audioDir, "")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to build file tree: %v", err)})
-		return
+	// Build tree for each allowed directory
+	trees := make(map[string]*FileTreeNode)
+	var totalSize int64
+	var totalFiles int
+
+	for _, dir := range allowedDirs {
+		dirPath := filepath.Join(baseDir, dir)
+
+		// Check if directory exists
+		if _, err := os.Stat(dirPath); os.IsNotExist(err) {
+			// Create empty node for missing directories
+			trees[dir] = &FileTreeNode{
+				Name:     dir,
+				Path:     dir,
+				IsDir:    true,
+				Children: []*FileTreeNode{},
+			}
+			continue
+		}
+
+		// Build the tree for this directory
+		tree, err := buildFileTree(dirPath, "")
+		if err != nil {
+			log.Printf("Warning: Failed to build tree for %s: %v", dir, err)
+			trees[dir] = &FileTreeNode{
+				Name:     dir,
+				Path:     dir,
+				IsDir:    true,
+				Children: []*FileTreeNode{},
+			}
+			continue
+		}
+
+		// Update the name and path to be the directory name
+		tree.Name = dir
+		tree.Path = dir
+		trees[dir] = tree
+
+		// Calculate stats for this directory
+		dirSize, dirFiles := calculateTreeStats(tree)
+		totalSize += dirSize
+		totalFiles += dirFiles
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"tree": tree,
-		"root": audioDir,
+		"trees":       trees,
+		"root":        baseDir,
+		"directories": allowedDirs,
+		"stats": gin.H{
+			"totalSize":  totalSize,
+			"totalFiles": totalFiles,
+		},
 	})
 }
 
@@ -1816,4 +1855,23 @@ func buildFileTree(basePath string, relativePath string) (*FileTreeNode, error) 
 	})
 
 	return node, nil
+}
+
+// calculateTreeStats recursively calculates total size and file count for a tree
+func calculateTreeStats(node *FileTreeNode) (totalSize int64, totalFiles int) {
+	if node == nil {
+		return 0, 0
+	}
+
+	if !node.IsDir {
+		return node.Size, 1
+	}
+
+	for _, child := range node.Children {
+		size, files := calculateTreeStats(child)
+		totalSize += size
+		totalFiles += files
+	}
+
+	return totalSize, totalFiles
 }
