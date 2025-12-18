@@ -293,7 +293,8 @@ func extractCoversFromResponse(response *ResponsesAPIResponse) []CoverOption {
 	for _, item := range response.Output {
 		if item.Type == "message" && len(item.Content) > 0 {
 			for _, content := range item.Content {
-				if content.Type == "output_text" && content.Text != "" {
+				// Check for both "text" and "output_text" content types (API variations)
+				if (content.Type == "output_text" || content.Type == "text") && content.Text != "" {
 					// Try to extract JSON array from text
 					jsonCovers := extractJSONCovers(content.Text)
 					covers = append(covers, jsonCovers...)

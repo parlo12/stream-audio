@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -143,9 +145,9 @@ Return ONLY the direct image URL on a single line. Do not include any explanatio
 		return "", fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	// Log raw response for debugging (first 500 chars)
-	if len(bodyBytes) > 500 {
-		log.Printf("OpenAI Response (truncated): %s...", string(bodyBytes[:500]))
+	// Log raw response for debugging (first 2000 chars to see more of the structure)
+	if len(bodyBytes) > 2000 {
+		log.Printf("OpenAI Response (truncated): %s...", string(bodyBytes[:2000]))
 	} else {
 		log.Printf("OpenAI Response: %s", string(bodyBytes))
 	}
@@ -170,154 +172,112 @@ Return ONLY the direct image URL on a single line. Do not include any explanatio
 	return imageURL, nil
 }
 
+// URL regex pattern for extracting URLs from text
+var urlRegex = regexp.MustCompile(`https?://[^\s\)\]"'<>]+`)
+
 // isImageURL checks if a URL points to an image
 func isImageURL(url string) bool {
-	urlLower := ""
-	for i := 0; i < len(url); i++ {
-		c := url[i]
-		if c >= 'A' && c <= 'Z' {
-			urlLower += string(c + 32) // Convert to lowercase
-		} else {
-			urlLower += string(c)
-		}
-	}
-
-	return containsAny(urlLower, []string{".jpg", ".jpeg", ".png", ".webp", ".gif"})
-}
-
-// containsAny checks if the string contains any of the given substrings
-func containsAny(s string, substrs []string) bool {
-	for _, substr := range substrs {
-		if len(s) >= len(substr) {
-			for i := 0; i <= len(s)-len(substr); i++ {
-				if s[i:i+len(substr)] == substr {
-					return true
-				}
-			}
+	urlLower := strings.ToLower(url)
+	imageExtensions := []string{".jpg", ".jpeg", ".png", ".webp", ".gif"}
+	for _, ext := range imageExtensions {
+		if strings.Contains(urlLower, ext) {
+			return true
 		}
 	}
 	return false
 }
 
-// cleanURL removes markdown formatting and whitespace from URLs
-func cleanURL(url string) string {
-	// Remove leading/trailing whitespace
-	cleaned := ""
-	start := 0
-	end := len(url)
-
-	// Trim leading whitespace
-	for start < len(url) && (url[start] == ' ' || url[start] == '\n' || url[start] == '\t') {
-		start++
+// isImageCDNURL checks if URL is from a known book cover CDN
+func isImageCDNURL(url string) bool {
+	cdns := []string{
+		"images-na.ssl-images-amazon.com",
+		"m.media-amazon.com",
+		"images.gr-assets.com",
+		"i.gr-assets.com",
+		"books.google.com",
+		"covers.openlibrary.org",
+		"prodimage.images-bn.com",
+		"images-us.bookshop.org",
+		"img.thriftbooks.com",
 	}
-
-	// Trim trailing whitespace
-	for end > start && (url[end-1] == ' ' || url[end-1] == '\n' || url[end-1] == '\t') {
-		end--
-	}
-
-	cleaned = url[start:end]
-
-	// Remove markdown link formatting if present: [text](url) -> url
-	if len(cleaned) > 4 && cleaned[0] == '[' {
-		// Find the ]( pattern
-		for i := 1; i < len(cleaned)-1; i++ {
-			if cleaned[i] == ']' && i+1 < len(cleaned) && cleaned[i+1] == '(' {
-				// Extract URL from parentheses
-				start := i + 2
-				end := len(cleaned)
-				if end > start && cleaned[end-1] == ')' {
-					end--
-				}
-				if start < end {
-					cleaned = cleaned[start:end]
-				}
-				break
-			}
+	for _, cdn := range cdns {
+		if strings.Contains(url, cdn) {
+			return true
 		}
 	}
-
-	return cleaned
+	return false
 }
 
-// extractURLFromText extracts a valid image URL from text
-func extractURLFromText(text string) string {
-	// Try to find URLs in the text using simple pattern matching
-	// Look for http:// or https:// followed by characters until whitespace
+// cleanURL removes trailing punctuation and cleans up URL
+func cleanURL(url string) string {
+	url = strings.TrimSpace(url)
+	// Remove trailing punctuation that might have been captured
+	url = strings.TrimSuffix(url, ",")
+	url = strings.TrimSuffix(url, ".")
+	url = strings.TrimSuffix(url, ";")
+	return url
+}
 
-	httpIndex := -1
-	for i := 0; i < len(text)-7; i++ {
-		if text[i:i+7] == "http://" || (i < len(text)-8 && text[i:i+8] == "https://") {
-			httpIndex = i
-			break
+// extractAllURLsFromText extracts all URLs from text using regex
+func extractAllURLsFromText(text string) []string {
+	matches := urlRegex.FindAllString(text, -1)
+	var urls []string
+	for _, match := range matches {
+		urls = append(urls, cleanURL(match))
+	}
+	return urls
+}
+
+// findBestImageURL finds the best image URL from a list of URLs
+func findBestImageURL(urls []string) string {
+	// First pass: look for URLs with image extensions
+	for _, url := range urls {
+		if isImageURL(url) {
+			log.Printf("🖼️ Found image URL with extension: %s", truncateString(url, 100))
+			return url
 		}
 	}
-
-	if httpIndex == -1 {
-		return ""
-	}
-
-	// Find the end of the URL (whitespace, newline, or end of string)
-	endIndex := len(text)
-	for i := httpIndex; i < len(text); i++ {
-		c := text[i]
-		if c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == ')' || c == ']' {
-			endIndex = i
-			break
+	// Second pass: look for URLs from known CDNs
+	for _, url := range urls {
+		if isImageCDNURL(url) {
+			log.Printf("🖼️ Found CDN image URL: %s", truncateString(url, 100))
+			return url
 		}
 	}
-
-	url := text[httpIndex:endIndex]
-
-	// Validate it's an image URL
-	if isImageURL(url) {
-		return cleanURL(url)
-	}
-
 	return ""
 }
 
 // extractImageURLFromResponse parses the OpenAI Responses API output to find the image URL
 func extractImageURLFromResponse(response *ResponsesAPIResponse) string {
+	var allURLs []string
+
 	// First, try to extract from output_text (simplest case)
 	if response.OutputText != "" {
-		url := extractURLFromText(response.OutputText)
-		if url != "" {
-			return url
-		}
-		// Also check for known CDN URLs
-		url = extractCDNURLFromText(response.OutputText)
-		if url != "" {
-			return url
-		}
+		log.Printf("📝 Found output_text: %s", truncateString(response.OutputText, 300))
+		urls := extractAllURLsFromText(response.OutputText)
+		allURLs = append(allURLs, urls...)
 	}
 
-	// Otherwise, parse the output items
-	for _, item := range response.Output {
-		if item.Type == "message" && len(item.Content) > 0 {
-			for _, content := range item.Content {
-				if content.Type == "output_text" && content.Text != "" {
-					log.Printf("📝 Parsing message content: %s...", truncateString(content.Text, 200))
+	// Parse the output items
+	for i, item := range response.Output {
+		log.Printf("📦 Output item %d: type=%s, role=%s, content_count=%d", i, item.Type, item.Role, len(item.Content))
 
-					url := extractURLFromText(content.Text)
-					if url != "" {
-						return url
-					}
-					// Also check for known CDN URLs
-					url = extractCDNURLFromText(content.Text)
-					if url != "" {
-						return url
-					}
+		if item.Type == "message" && len(item.Content) > 0 {
+			for j, content := range item.Content {
+				log.Printf("   Content %d: type=%s, text_len=%d, annotations=%d", j, content.Type, len(content.Text), len(content.Annotations))
+
+				// Check for both "text" and "output_text" content types (API variations)
+				if (content.Type == "output_text" || content.Type == "text") && content.Text != "" {
+					log.Printf("📝 Parsing message content: %s", truncateString(content.Text, 300))
+					urls := extractAllURLsFromText(content.Text)
+					allURLs = append(allURLs, urls...)
 				}
 
 				// Also check annotations for URLs
 				for _, annotation := range content.Annotations {
 					if annotation.Type == "url_citation" && annotation.URL != "" {
 						log.Printf("📎 Found annotation URL: %s", annotation.URL)
-						// Check if this URL is an image or from a known CDN
-						if isImageURL(annotation.URL) || isKnownImageCDN(annotation.URL) {
-							return annotation.URL
-						}
+						allURLs = append(allURLs, annotation.URL)
 					}
 				}
 			}
@@ -329,15 +289,16 @@ func extractImageURLFromResponse(response *ResponsesAPIResponse) string {
 			for _, source := range item.Action.Sources {
 				if source.URL != "" {
 					log.Printf("   Source URL: %s", truncateString(source.URL, 100))
-					if isImageURL(source.URL) || isKnownImageCDN(source.URL) {
-						return source.URL
-					}
+					allURLs = append(allURLs, source.URL)
 				}
 			}
 		}
 	}
 
-	return ""
+	log.Printf("📊 Total URLs found: %d", len(allURLs))
+
+	// Find the best image URL from all collected URLs
+	return findBestImageURL(allURLs)
 }
 
 // truncateString truncates a string to maxLen characters
@@ -346,57 +307,6 @@ func truncateString(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
-}
-
-// extractCDNURLFromText finds URLs from known book cover CDNs in text
-func extractCDNURLFromText(text string) string {
-	cdnPatterns := []string{
-		"images-na.ssl-images-amazon.com",
-		"m.media-amazon.com",
-		"images.gr-assets.com",
-		"i.gr-assets.com",
-		"books.google.com",
-		"covers.openlibrary.org",
-		"prodimage.images-bn.com",
-	}
-
-	for _, cdn := range cdnPatterns {
-		idx := -1
-		for i := 0; i <= len(text)-len(cdn); i++ {
-			if text[i:i+len(cdn)] == cdn {
-				idx = i
-				break
-			}
-		}
-		if idx == -1 {
-			continue
-		}
-
-		// Find the start of the URL (look backwards for http)
-		start := idx
-		for start > 0 && !(text[start:start+4] == "http") {
-			start--
-		}
-
-		// Find the end of the URL
-		end := idx + len(cdn)
-		for end < len(text) {
-			c := text[end]
-			if c == ' ' || c == '\n' || c == '\r' || c == '"' || c == '\'' || c == ')' || c == ']' || c == '>' {
-				break
-			}
-			end++
-		}
-
-		if start >= 0 && end > start {
-			url := text[start:end]
-			if len(url) > 10 { // basic validation
-				return url
-			}
-		}
-	}
-
-	return ""
 }
 
 
@@ -436,8 +346,7 @@ func downloadAndSaveImage(imageURL, bookID string) (string, error) {
 		}
 	} else {
 		// Fallback: detect from URL
-		urlLower := imageURL
-		if containsAny(urlLower, []string{".png"}) {
+		if strings.Contains(strings.ToLower(imageURL), ".png") {
 			ext = ".png"
 		}
 	}
