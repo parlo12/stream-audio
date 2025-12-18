@@ -500,7 +500,7 @@ func fetchAndSaveBookCover(title, author, bookID string) (localPath string, publ
 		localPath, downloadErr = downloadAndSaveImage(imageURL, bookID)
 		if downloadErr == nil {
 			// Success!
-			host := getEnv("STREAM_HOST", "http://localhost:8083")
+			host := getEnv("STREAM_HOST", "https://narrafied.com")
 			filename := filepath.Base(localPath)
 			publicURL = fmt.Sprintf("%s/covers/%s", host, filename)
 			return localPath, publicURL, nil
@@ -515,7 +515,7 @@ func fetchAndSaveBookCover(title, author, bookID string) (localPath string, publ
 	if imageURL != "" {
 		localPath, downloadErr = downloadAndSaveImage(imageURL, bookID)
 		if downloadErr == nil {
-			host := getEnv("STREAM_HOST", "http://localhost:8083")
+			host := getEnv("STREAM_HOST", "https://narrafied.com")
 			filename := filepath.Base(localPath)
 			publicURL = fmt.Sprintf("%s/covers/%s", host, filename)
 			return localPath, publicURL, nil

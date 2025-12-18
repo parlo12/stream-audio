@@ -38,7 +38,7 @@ func uploadBookCoverHandler(c *gin.Context) {
 	c.SaveUploadedFile(file, dest)
 
 	// immediate response
-	host := getEnv("STREAM_HOST", "http://localhost:8083")
+	host := getEnv("STREAM_HOST", "https://narrafied.com")
 	coverURL := fmt.Sprintf("%s/covers/%s", host, filename)
 	c.JSON(http.StatusAccepted, gin.H{"message": "upload in progress", "cover_url": coverURL})
 

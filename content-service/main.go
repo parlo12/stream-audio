@@ -407,7 +407,7 @@ func listBookPagesHandler(c *gin.Context) {
 			"status":  chunk.TTSStatus,
 			// "audio_url": chunk.AudioPath,
 			"audio_url": fmt.Sprintf("%s/user/books/%d/pages/%d/audio",
-				getEnv("STREAM_HOST", ""), chunk.BookID, chunk.Index), // use in local http://0.0.0.0:8083
+				getEnv("STREAM_HOST", "https://narrafied.com"), chunk.BookID, chunk.Index),
 		})
 	}
 
@@ -437,8 +437,7 @@ func listBookPagesHandler(c *gin.Context) {
 // If the category is invalid, it returns an error.
 // It also adds a public stream URL to each book in the response.
 // If the database query fails, it returns an error with details.
-// The stream URL is constructed using the STREAM_HOST environment variable, defaulting to "http://100.110.176.220:8083"
-// If the STREAM_HOST environment variable is not set, it uses the default value.
+// The stream URL is constructed using the STREAM_HOST environment variable, defaulting to "https://narrafied.com"
 // It returns a JSON response with the list of books, each containing its ID, title, author, category, genre, file path, audio path, status, stream URL, cover URL, and cover path.
 // It uses the Gin framework for handling HTTP requests and responses.
 func listBooksHandler(c *gin.Context) {
@@ -477,11 +476,7 @@ func listBooksHandler(c *gin.Context) {
 	}
 
 	//🛡 Add public stream URL to each book
-	streamHost := getEnv("STREAM_HOST", "") // use locally http://100.110.176.220:8083
-	if streamHost == "" {
-		log.Println("STREAM_HOST environment variable not set, using default http://100.110.176.220:8083")
-		streamHost = "http://100.110.176.220:8083"
-	}
+	streamHost := getEnv("STREAM_HOST", "https://narrafied.com")
 	var response []BookResponse
 	for _, book := range books {
 		streamURL := streamHost + "/user/books/stream/proxy/" + fmt.Sprintf("%d", book.ID)
@@ -775,11 +770,6 @@ func getSingleBookHandler(c *gin.Context) {
 		FilePath:    book.FilePath,
 		AudioPath:   book.AudioPath,
 		Status:      book.Status,
-	}
-
-	streamHost := getEnv("STREAM_HOST", "") // use locally http://100.110.176.220:8083
-	if streamHost == "" {
-		streamHost = "http://100.110.176.220:8083"
 	}
 
 	c.JSON(http.StatusOK, gin.H{
