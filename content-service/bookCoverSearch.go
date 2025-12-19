@@ -23,6 +23,7 @@ import (
 type CoverSearchRequest struct {
 	Title  string `json:"title" binding:"required"`
 	Author string `json:"author"`
+	BookID uint   `json:"book_id"` // Optional: if provided, include auto-fetched cover
 }
 
 // CoverOption represents a single cover option returned to the user
@@ -47,6 +48,7 @@ type SelectCoverRequest struct {
 
 // SearchBookCoversHandler handles POST /user/search-book-covers
 // Returns multiple cover options for the user to choose from
+// If book_id is provided, includes any auto-fetched cover first
 func SearchBookCoversHandler(c *gin.Context) {
 	var req CoverSearchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -54,12 +56,52 @@ func SearchBookCoversHandler(c *gin.Context) {
 		return
 	}
 
-	log.Printf("🔍 Searching covers for: %s by %s", req.Title, req.Author)
+	log.Printf("🔍 Searching covers for: %s by %s (book_id: %d)", req.Title, req.Author, req.BookID)
 
-	// Search for covers using OpenAI
-	covers, err := searchMultipleCovers(req.Title, req.Author)
+	var allCovers []CoverOption
+
+	// Step 1: Check if book already has an auto-fetched cover
+	if req.BookID > 0 {
+		var book Book
+		if err := db.First(&book, req.BookID).Error; err == nil {
+			if book.CoverURL != "" && book.CoverURL != "http://placeholder.com/default.jpg" {
+				// Ensure URL uses HTTPS
+				coverURL := book.CoverURL
+				host := getEnv("STREAM_HOST", "https://narrafied.com")
+
+				// Convert any old HTTP IP URLs to HTTPS domain
+				if strings.Contains(coverURL, "http://68.183.22.205") {
+					coverURL = strings.Replace(coverURL, "http://68.183.22.205:8083", host, 1)
+				}
+				if strings.Contains(coverURL, "http://localhost") {
+					coverURL = strings.Replace(coverURL, "http://localhost:8083", host, 1)
+				}
+
+				log.Printf("📋 Found auto-fetched cover for book %d: %s", req.BookID, coverURL)
+				allCovers = append(allCovers, CoverOption{
+					URL:         coverURL,
+					Source:      "narrafied.com",
+					Description: "Auto-fetched cover",
+				})
+			}
+		}
+	}
+
+	// Step 2: Search for additional covers using OpenAI
+	searchCovers, err := searchMultipleCovers(req.Title, req.Author)
 	if err != nil {
 		log.Printf("⚠️ Cover search error: %v", err)
+		// If we have auto-fetched cover, still return it even if search fails
+		if len(allCovers) > 0 {
+			log.Printf("✅ Returning %d auto-fetched cover(s) despite search error", len(allCovers))
+			c.JSON(http.StatusOK, CoverSearchResponse{
+				Title:   req.Title,
+				Author:  req.Author,
+				Covers:  allCovers,
+				Message: fmt.Sprintf("Found %d cover option(s)", len(allCovers)),
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "Failed to search for covers",
 			"details": err.Error(),
@@ -67,7 +109,23 @@ func SearchBookCoversHandler(c *gin.Context) {
 		return
 	}
 
-	if len(covers) == 0 {
+	// Step 3: Add search results (avoiding duplicates)
+	for _, cover := range searchCovers {
+		isDuplicate := false
+		for _, existing := range allCovers {
+			if existing.URL == cover.URL {
+				isDuplicate = true
+				break
+			}
+		}
+		if !isDuplicate {
+			allCovers = append(allCovers, cover)
+		}
+	}
+
+	log.Printf("✅ Found %d total cover options for %s (auto-fetched + search)", len(allCovers), req.Title)
+
+	if len(allCovers) == 0 {
 		c.JSON(http.StatusOK, CoverSearchResponse{
 			Title:   req.Title,
 			Author:  req.Author,
@@ -77,12 +135,11 @@ func SearchBookCoversHandler(c *gin.Context) {
 		return
 	}
 
-	log.Printf("✅ Found %d cover options for %s", len(covers), req.Title)
-
 	c.JSON(http.StatusOK, CoverSearchResponse{
-		Title:  req.Title,
-		Author: req.Author,
-		Covers: covers,
+		Title:   req.Title,
+		Author:  req.Author,
+		Covers:  allCovers,
+		Message: fmt.Sprintf("Found %d cover option(s)", len(allCovers)),
 	})
 }
 
