@@ -397,7 +397,7 @@ MQTT_PASSWORD=<optional>
 
 # Deployment
 GIN_MODE=release (prod) | debug (dev)
-STREAM_HOST=http://localhost:8083        # Public URL for streaming
+STREAM_HOST=https://narrafied.com        # Public URL for streaming (MUST be HTTPS for iOS)
 ```
 
 ## Deployment
