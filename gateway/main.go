@@ -42,6 +42,9 @@ func main() {
 	// proxy content endpoints
 	router.Any("/content/*proxyPath", wrapProxy(contentProxy))
 
+	// proxy admin endpoints to content-service
+	router.Any("/admin/*proxyPath", wrapProxy(contentProxy))
+
 	log.Printf("▶ Gateway listening on :%s, forwarding auth→%s, content→%s",
 		gatewayPort, authSvcURL, contentSvcURL)
 
