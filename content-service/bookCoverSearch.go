@@ -63,7 +63,10 @@ func SearchBookCoversHandler(c *gin.Context) {
 	// Step 1: Check if book already has an auto-fetched cover
 	if req.BookID > 0 {
 		var book Book
-		if err := db.First(&book, req.BookID).Error; err == nil {
+		if err := db.First(&book, req.BookID).Error; err != nil {
+			log.Printf("⚠️ Failed to fetch book %d for cover search: %v", req.BookID, err)
+		} else {
+			log.Printf("📖 Book %d found - CoverURL: '%s', CoverPath: '%s'", req.BookID, book.CoverURL, book.CoverPath)
 			if book.CoverURL != "" && book.CoverURL != "http://placeholder.com/default.jpg" {
 				// Ensure URL uses HTTPS
 				coverURL := book.CoverURL

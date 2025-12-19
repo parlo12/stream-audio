@@ -299,13 +299,15 @@ func createBookHandler(c *gin.Context) {
 		}
 
 		// Update the book record with cover information
+		// Note: GORM map keys must use snake_case database column names, not Go field names
 		if err := db.Model(&Book{}).Where("id = ?", b.ID).Updates(map[string]interface{}{
-			"CoverPath": localPath,
-			"CoverURL":  publicURL,
+			"cover_path": localPath,
+			"cover_url":  publicURL,
 		}).Error; err != nil {
 			log.Printf("⚠️ Failed to update book cover for book ID %d: %v", b.ID, err)
 			return
 		}
+		log.Printf("✅ Auto-fetch saved cover_url to database for book %d: %s", b.ID, publicURL)
 
 		// Publish MQTT event
 		payload := map[string]interface{}{
