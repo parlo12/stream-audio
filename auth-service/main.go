@@ -208,7 +208,7 @@ func main() {
 		admin.GET("/files/tree", getFileTreeHandler)
 
 		// Individual file delete endpoint
-		admin.DELETE("/files/delete", deleteFileHandler)
+		admin.DELETE("/files", deleteFileHandler)
 
 		// Maintenance endpoints
 		admin.POST("/system/wipe", wipeSystemHandler)
@@ -1861,12 +1861,23 @@ func calculateTreeStats(node *FileTreeNode) (totalSize int64, totalFiles int) {
 // Body: { "file_path": "audio/book_21_chunk_5.mp3" }
 func deleteFileHandler(c *gin.Context) {
 	type DeleteFileRequest struct {
-		FilePath string `json:"file_path" binding:"required"`
+		FilePath string `json:"file_path"`
+		Path     string `json:"path"`
 	}
 
 	var req DeleteFileRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "file_path is required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	// Support both "path" and "file_path" for compatibility
+	if req.Path != "" && req.FilePath == "" {
+		req.FilePath = req.Path
+	}
+
+	if req.FilePath == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file_path or path is required"})
 		return
 	}
 
