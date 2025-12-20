@@ -192,7 +192,7 @@ func main() {
 	admin.Use(authMiddleware(), adminMiddleware())
 	{
 		admin.DELETE("/users/:user_id/files", deleteUserFilesContentHandler)
-		admin.DELETE("/files/delete", deleteFileContentHandler)
+		admin.DELETE("/files", deleteFileContentHandler)
 		admin.GET("/files/tree", getFileTreeContentHandler)
 	}
 
