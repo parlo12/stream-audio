@@ -396,11 +396,19 @@ func mergeAudioSegments(segmentPaths []string, outputPath string) error {
 	}
 
 	// Create a file list for FFmpeg concat
+	// The list file will be in the same directory as segments, so use just filenames
 	listPath := "./audio/concat_list.txt"
 	var listContent strings.Builder
 	for _, path := range segmentPaths {
-		// FFmpeg concat requires escaped single quotes for paths with spaces
-		listContent.WriteString(fmt.Sprintf("file '%s'\n", path))
+		// Extract just the filename since concat list is relative to its location
+		// path is like "./audio/segment_X_Y.mp3", we need just "segment_X_Y.mp3"
+		filename := path
+		if strings.HasPrefix(path, "./audio/") {
+			filename = strings.TrimPrefix(path, "./audio/")
+		} else if idx := strings.LastIndex(path, "/"); idx >= 0 {
+			filename = path[idx+1:]
+		}
+		listContent.WriteString(fmt.Sprintf("file '%s'\n", filename))
 	}
 	if err := os.WriteFile(listPath, []byte(listContent.String()), 0644); err != nil {
 		return fmt.Errorf("create concat list: %w", err)
