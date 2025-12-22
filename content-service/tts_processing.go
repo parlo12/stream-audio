@@ -1,10 +1,10 @@
 package main
 
 // content-service/tts_processing.go
-// this file handles TTS processing using OpenAI's API.
-// It generates SSML from plain text using GPT, then converts that SSML to audio using OpenAI's TTS API.
+// This file handles TTS processing using OpenAI's API.
+// It prepares text for expressive narration using GPT, then converts it to audio using OpenAI's TTS API.
+// Note: OpenAI TTS does NOT support SSML - we use plain text with the "instructions" field for voice control.
 // It also checks for existing audio files to avoid redundant processing.
-// It processes books in the database, converting their text content to audio files.
 
 import (
 	"bytes"
@@ -22,19 +22,10 @@ import (
 	"gorm.io/gorm"
 )
 
-func wrapSSML(text string) string {
-	t := strings.TrimSpace(text)
-	if strings.HasPrefix(t, "<speak") {
-		return t
-	}
-	return "<speak>\n" + t + "\n</speak>"
-}
-
 const openaiTTSEndpoint = "https://api.openai.com/v1/audio/speech"
 
 type TTSPayload struct {
 	Input          string  `json:"input"`
-	InputFormat    string  `json:"input_format,omitempty"`
 	Model          string  `json:"model"`
 	Voice          string  `json:"voice"`
 	Instructions   string  `json:"instructions,omitempty"`
@@ -42,14 +33,21 @@ type TTSPayload struct {
 	Speed          float64 `json:"speed,omitempty"`
 }
 
-func generateSSML(rawText string) (string, error) {
-	systemContent := `You are an expressive audiobook narrator.
-Convert this into SSML:
-- Use <break time="500ms"/> at natural pauses
-- Wrap key phrases in <emphasis>
-- Use <prosody rate="80%">…</prosody> for sad passages
-- Use <prosody rate="110%">…</prosody> for action passages
-Output only the SSML wrapped in one <speak>…</speak> block.`
+// prepareNarratorText enhances raw text for expressive TTS narration
+// OpenAI TTS does NOT support SSML, so we use plain text with natural pauses
+func prepareNarratorText(rawText string) (string, error) {
+	systemContent := `You are preparing text for an audiobook narrator. Your job is to enhance the text for natural, expressive reading.
+
+Rules:
+1. Output ONLY the enhanced plain text - no XML, no SSML, no tags
+2. Add "..." for dramatic pauses where appropriate
+3. Keep the original meaning and words intact
+4. Add paragraph breaks between major scene changes
+5. Do NOT add any markup, tags, or special formatting
+6. Do NOT wrap in <speak> or any other tags
+7. Do NOT output "xml" or any code block markers
+
+Simply return the enhanced plain text ready to be read aloud.`
 
 	reqBody := ChatRequest{
 		Model: "gpt-4o",
@@ -57,8 +55,8 @@ Output only the SSML wrapped in one <speak>…</speak> block.`
 			{Role: "system", Content: systemContent},
 			{Role: "user", Content: rawText},
 		},
-		Temperature: 0.7,
-		MaxTokens:   1500,
+		Temperature: 0.5,
+		MaxTokens:   2000,
 	}
 
 	bodyBytes, _ := json.Marshal(reqBody)
@@ -74,53 +72,116 @@ Output only the SSML wrapped in one <speak>…</speak> block.`
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("GPT SSML call failed: %w", err)
+		return "", fmt.Errorf("GPT text prep call failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := ioutil.ReadAll(resp.Body)
-		return "", fmt.Errorf("GPT SSML returned %d: %s", resp.StatusCode, b)
+		return "", fmt.Errorf("GPT text prep returned %d: %s", resp.StatusCode, b)
 	}
 
 	var chatResp ChatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
-		return "", fmt.Errorf("decode SSML JSON: %w", err)
+		return "", fmt.Errorf("decode text prep JSON: %w", err)
 	}
 	if len(chatResp.Choices) == 0 {
-		return "", errors.New("no SSML choices returned")
+		return "", errors.New("no text prep choices returned")
 	}
 
-	raw := strings.TrimSpace(chatResp.Choices[0].Message.Content)
-	raw = strings.ReplaceAll(raw, "```", "")
-	raw = strings.ReplaceAll(raw, "```ssml", "")
-	raw = strings.ReplaceAll(raw, "```xml", "")
-	raw = strings.TrimPrefix(raw, "```xml")
-	raw = strings.ReplaceAll(raw, "```xml ssml", "")
-	raw = strings.TrimPrefix(raw, "```")
-	raw = strings.TrimSuffix(raw, "```")
-	ssml := wrapSSML(raw)
-	log.Printf("SSML: %s", ssml)
-	return ssml, nil
+	// Clean up any residual markup that GPT might have added
+	text := strings.TrimSpace(chatResp.Choices[0].Message.Content)
+	text = cleanupForTTS(text)
+
+	log.Printf("📝 Prepared narrator text: %s", truncateLog(text, 200))
+	return text, nil
+}
+
+// cleanupForTTS removes any XML/SSML tags and code block markers from text
+func cleanupForTTS(text string) string {
+	// Remove code block markers
+	text = strings.ReplaceAll(text, "```xml", "")
+	text = strings.ReplaceAll(text, "```ssml", "")
+	text = strings.ReplaceAll(text, "```", "")
+
+	// Remove common SSML/XML tags if GPT still adds them
+	tagsToRemove := []string{
+		"<speak>", "</speak>",
+		"<break", "/>",
+		"<emphasis>", "</emphasis>",
+		"<prosody", "</prosody>",
+		"rate=\"", "time=\"",
+		"xml", "ssml",
+	}
+	for _, tag := range tagsToRemove {
+		text = strings.ReplaceAll(text, tag, "")
+	}
+
+	// Clean up any remaining angle brackets that look like tags
+	// This regex-like cleanup removes patterns like <...>
+	result := strings.Builder{}
+	inTag := false
+	for _, ch := range text {
+		if ch == '<' {
+			inTag = true
+			continue
+		}
+		if ch == '>' {
+			inTag = false
+			continue
+		}
+		if !inTag {
+			result.WriteRune(ch)
+		}
+	}
+	text = result.String()
+
+	// Clean up extra whitespace
+	text = strings.TrimSpace(text)
+
+	// Replace multiple spaces with single space
+	for strings.Contains(text, "  ") {
+		text = strings.ReplaceAll(text, "  ", " ")
+	}
+
+	return text
+}
+
+// truncateLog truncates a string for logging purposes
+func truncateLog(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 func convertTextToAudio(text string, bookID uint) (string, error) {
-	ssml, err := generateSSML(text)
+	// Prepare text for narration (no SSML - OpenAI TTS doesn't support it)
+	narratorText, err := prepareNarratorText(text)
 	if err != nil {
-		return "", fmt.Errorf("SSML generation failed: %w", err)
+		// Fall back to original text if preparation fails
+		log.Printf("⚠️ Text preparation failed, using original: %v", err)
+		narratorText = text
 	}
-	ssml = wrapSSML(ssml)
 
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
 		return "", errors.New("OPENAI_API_KEY not set")
 	}
 
+	// Use instructions to guide expressive narration instead of SSML
+	instructions := `You are an expressive audiobook narrator. Read with emotion and drama:
+- Pause naturally at sentence endings and paragraph breaks
+- Use varied pacing: slower for emotional moments, faster for action
+- Emphasize key words and phrases
+- Convey character emotions through tone
+- Add subtle pauses at ellipses (...)`
+
 	payload := TTSPayload{
-		Input:          ssml,
+		Input:          narratorText,
 		Model:          "gpt-4o-mini-tts",
 		Voice:          "alloy",
-		Instructions:   "Interpret SSML with breaks, prosody, emphasis. Do not speak tags.",
+		Instructions:   instructions,
 		ResponseFormat: "mp3",
 		Speed:          1.0,
 	}
