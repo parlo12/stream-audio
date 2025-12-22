@@ -185,6 +185,10 @@ func main() {
 		authorized.GET("/progress", GetAllPlaybackProgressHandler)                   // Get all progress for user
 		authorized.DELETE("/books/:book_id/progress", DeletePlaybackProgressHandler) // Reset progress for a book
 
+		// Listening statistics endpoints
+		authorized.GET("/stats/most-played", GetMostPlayedBooksHandler) // Get most played books
+		authorized.GET("/stats/by-genre", GetStatsByGenreHandler)       // Get stats grouped by genre
+
 	}
 
 	// Admin routes group

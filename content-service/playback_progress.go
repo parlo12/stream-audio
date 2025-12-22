@@ -18,6 +18,8 @@ type PlaybackProgress struct {
 	Duration           float64   `gorm:"not null;default:0" json:"duration"`             // Total duration of the book in seconds
 	ChunkIndex         int       `gorm:"not null;default:0" json:"chunk_index"`          // Current chunk/page index
 	CompletionPercent  float64   `gorm:"not null;default:0" json:"completion_percent"`   // Percentage completed (0-100)
+	PlayCount          int       `gorm:"not null;default:0" json:"play_count"`           // Number of play sessions
+	TotalListenTime    float64   `gorm:"not null;default:0" json:"total_listen_time"`    // Total time spent listening in seconds
 	LastPlayedAt       time.Time `gorm:"not null" json:"last_played_at"`                 // When the user last played this book
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
@@ -28,6 +30,7 @@ type UpdateProgressRequest struct {
 	CurrentPosition float64 `json:"current_position" binding:"required"` // Position in seconds
 	Duration        float64 `json:"duration"`                            // Total duration (optional, will be calculated if not provided)
 	ChunkIndex      int     `json:"chunk_index"`                         // Current chunk/page index
+	IsNewSession    bool    `json:"is_new_session"`                      // True if this is a new play session (user pressed play)
 }
 
 // ProgressResponse returns progress information for a book
@@ -103,7 +106,7 @@ func UpdatePlaybackProgressHandler(c *gin.Context) {
 	result := db.Where("user_id = ? AND book_id = ?", userID, bookID).First(&progress)
 
 	if result.Error == gorm.ErrRecordNotFound {
-		// Create new progress record
+		// Create new progress record - first play session
 		progress = PlaybackProgress{
 			UserID:            userID.(uint),
 			BookID:            book.ID,
@@ -111,6 +114,8 @@ func UpdatePlaybackProgressHandler(c *gin.Context) {
 			Duration:          duration,
 			ChunkIndex:        req.ChunkIndex,
 			CompletionPercent: completionPercent,
+			PlayCount:         1, // First play
+			TotalListenTime:   req.CurrentPosition,
 			LastPlayedAt:      time.Now(),
 		}
 		if err := db.Create(&progress).Error; err != nil {
@@ -118,24 +123,42 @@ func UpdatePlaybackProgressHandler(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save progress", "details": err.Error()})
 			return
 		}
-		log.Printf("✅ Created new progress for user %d, book %d at %.2fs", userID, book.ID, req.CurrentPosition)
+		log.Printf("✅ Created new progress for user %d, book %d at %.2fs (play #1)", userID, book.ID, req.CurrentPosition)
 	} else if result.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error", "details": result.Error.Error()})
 		return
 	} else {
+		// Calculate listen time delta (time listened since last update)
+		listenDelta := req.CurrentPosition - progress.CurrentPosition
+		if listenDelta < 0 {
+			// User rewound or started from earlier position, don't count negative
+			listenDelta = 0
+		}
+		// Cap delta to prevent unrealistic values (e.g., max 5 minutes between updates)
+		if listenDelta > 300 {
+			listenDelta = 300
+		}
+
 		// Update existing progress record
 		progress.CurrentPosition = req.CurrentPosition
 		progress.Duration = duration
 		progress.ChunkIndex = req.ChunkIndex
 		progress.CompletionPercent = completionPercent
+		progress.TotalListenTime += listenDelta
 		progress.LastPlayedAt = time.Now()
+
+		// Increment play count if this is a new session
+		if req.IsNewSession {
+			progress.PlayCount++
+			log.Printf("🎵 New play session for user %d, book %d (play #%d)", userID, book.ID, progress.PlayCount)
+		}
 
 		if err := db.Save(&progress).Error; err != nil {
 			log.Printf("❌ Failed to update progress: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update progress", "details": err.Error()})
 			return
 		}
-		log.Printf("✅ Updated progress for user %d, book %d to %.2fs (%.1f%%)", userID, book.ID, req.CurrentPosition, completionPercent)
+		log.Printf("✅ Updated progress for user %d, book %d to %.2fs (%.1f%%, total: %.0fs)", userID, book.ID, req.CurrentPosition, completionPercent, progress.TotalListenTime)
 	}
 
 	// 8. Return updated progress
@@ -267,4 +290,177 @@ func DeletePlaybackProgressHandler(c *gin.Context) {
 
 	log.Printf("🗑️  Deleted progress for user %d, book %s", userID, bookID)
 	c.JSON(http.StatusOK, gin.H{"message": "Progress deleted successfully"})
+}
+
+// MostPlayedBookResponse represents a book with its play statistics
+type MostPlayedBookResponse struct {
+	BookID          uint      `json:"book_id"`
+	Title           string    `json:"title"`
+	Author          string    `json:"author"`
+	Genre           string    `json:"genre"`
+	Category        string    `json:"category"`
+	CoverURL        string    `json:"cover_url"`
+	PlayCount       int       `json:"play_count"`
+	TotalListenTime float64   `json:"total_listen_time"` // in seconds
+	LastPlayedAt    time.Time `json:"last_played_at"`
+}
+
+// GenreStatsResponse represents aggregated stats for a genre
+type GenreStatsResponse struct {
+	Genre           string  `json:"genre"`
+	BookCount       int     `json:"book_count"`
+	TotalPlays      int     `json:"total_plays"`
+	TotalListenTime float64 `json:"total_listen_time"` // in seconds
+}
+
+// GetMostPlayedBooksHandler returns the user's most played books
+// GET /user/stats/most-played
+func GetMostPlayedBooksHandler(c *gin.Context) {
+	// 1. Get user ID from JWT token
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+
+	// 2. Get optional limit parameter (default 10)
+	limit := 10
+	if l := c.Query("limit"); l != "" {
+		if parsed, err := parseInt(l); err == nil && parsed > 0 && parsed <= 50 {
+			limit = parsed
+		}
+	}
+
+	// 3. Query progress records ordered by play count
+	var progressRecords []PlaybackProgress
+	if err := db.Where("user_id = ? AND play_count > 0", userID).
+		Order("play_count DESC, total_listen_time DESC").
+		Limit(limit).
+		Find(&progressRecords).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve stats", "details": err.Error()})
+		return
+	}
+
+	// 4. Get book details for each progress record
+	var response []MostPlayedBookResponse
+	for _, p := range progressRecords {
+		var book Book
+		if err := db.First(&book, p.BookID).Error; err != nil {
+			continue // Skip if book not found
+		}
+
+		response = append(response, MostPlayedBookResponse{
+			BookID:          book.ID,
+			Title:           book.Title,
+			Author:          book.Author,
+			Genre:           book.Genre,
+			Category:        book.Category,
+			CoverURL:        book.CoverURL,
+			PlayCount:       p.PlayCount,
+			TotalListenTime: p.TotalListenTime,
+			LastPlayedAt:    p.LastPlayedAt,
+		})
+	}
+
+	// 5. Calculate summary stats
+	var totalPlays int
+	var totalListenTime float64
+	for _, r := range response {
+		totalPlays += r.PlayCount
+		totalListenTime += r.TotalListenTime
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"most_played":       response,
+		"count":             len(response),
+		"total_plays":       totalPlays,
+		"total_listen_time": totalListenTime,
+	})
+}
+
+// GetStatsByGenreHandler returns listening stats grouped by genre
+// GET /user/stats/by-genre
+func GetStatsByGenreHandler(c *gin.Context) {
+	// 1. Get user ID from JWT token
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+
+	// 2. Query all progress records for the user
+	var progressRecords []PlaybackProgress
+	if err := db.Where("user_id = ?", userID).Find(&progressRecords).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve stats", "details": err.Error()})
+		return
+	}
+
+	// 3. Get book details and aggregate by genre
+	genreStats := make(map[string]*GenreStatsResponse)
+
+	for _, p := range progressRecords {
+		var book Book
+		if err := db.First(&book, p.BookID).Error; err != nil {
+			continue // Skip if book not found
+		}
+
+		genre := book.Genre
+		if genre == "" {
+			genre = "Unknown"
+		}
+
+		if _, exists := genreStats[genre]; !exists {
+			genreStats[genre] = &GenreStatsResponse{
+				Genre: genre,
+			}
+		}
+
+		genreStats[genre].BookCount++
+		genreStats[genre].TotalPlays += p.PlayCount
+		genreStats[genre].TotalListenTime += p.TotalListenTime
+	}
+
+	// 4. Convert map to slice and sort by total plays
+	var response []GenreStatsResponse
+	for _, stats := range genreStats {
+		response = append(response, *stats)
+	}
+
+	// Sort by total plays (descending)
+	for i := 0; i < len(response)-1; i++ {
+		for j := i + 1; j < len(response); j++ {
+			if response[j].TotalPlays > response[i].TotalPlays {
+				response[i], response[j] = response[j], response[i]
+			}
+		}
+	}
+
+	// 5. Calculate total stats
+	var totalBooks, totalPlays int
+	var totalListenTime float64
+	for _, r := range response {
+		totalBooks += r.BookCount
+		totalPlays += r.TotalPlays
+		totalListenTime += r.TotalListenTime
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"genres":            response,
+		"genre_count":       len(response),
+		"total_books":       totalBooks,
+		"total_plays":       totalPlays,
+		"total_listen_time": totalListenTime,
+	})
+}
+
+// Helper function to parse int from string
+func parseInt(s string) (int, error) {
+	var result int
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, gorm.ErrInvalidData
+		}
+		result = result*10 + int(c-'0')
+	}
+	return result, nil
 }
