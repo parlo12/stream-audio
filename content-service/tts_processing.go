@@ -16,6 +16,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -24,6 +25,13 @@ import (
 
 const openaiTTSEndpoint = "https://api.openai.com/v1/audio/speech"
 
+// Voice constants for different speaker types
+const (
+	VoiceNarrator = "alloy"  // Neutral voice for narration
+	VoiceMale     = "onyx"   // Deep male voice for male characters
+	VoiceFemale   = "nova"   // Female voice for female characters
+)
+
 type TTSPayload struct {
 	Input          string  `json:"input"`
 	Model          string  `json:"model"`
@@ -31,6 +39,20 @@ type TTSPayload struct {
 	Instructions   string  `json:"instructions,omitempty"`
 	ResponseFormat string  `json:"response_format,omitempty"`
 	Speed          float64 `json:"speed,omitempty"`
+}
+
+// DialogueSegment represents a segment of text with speaker info
+type DialogueSegment struct {
+	Type       string `json:"type"`        // "narrator", "dialogue"
+	Speaker    string `json:"speaker"`     // Character name (empty for narrator)
+	Gender     string `json:"gender"`      // "male", "female", "unknown"
+	Text       string `json:"text"`        // The actual text to speak
+	IsDialogue bool   `json:"is_dialogue"` // True if character is speaking
+}
+
+// DialogueAnalysis is the response from GPT for dialogue parsing
+type DialogueAnalysis struct {
+	Segments []DialogueSegment `json:"segments"`
 }
 
 // prepareNarratorText enhances raw text for expressive TTS narration
@@ -155,11 +177,314 @@ func truncateLog(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
-func convertTextToAudio(text string, bookID uint) (string, error) {
-	// Prepare text for narration (no SSML - OpenAI TTS doesn't support it)
+// analyzeDialogue uses GPT to parse text into narrator and character dialogue segments
+func analyzeDialogue(rawText string) ([]DialogueSegment, error) {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		return nil, errors.New("OPENAI_API_KEY not set")
+	}
+
+	systemContent := `You are analyzing text for an audiobook production. Your job is to split the text into segments for different voice actors.
+
+IMPORTANT RULES:
+1. Identify dialogue (text in quotes) vs narration (everything else)
+2. For each dialogue segment, determine the speaker's gender (male/female/unknown)
+3. Look for context clues: "he said", "she replied", character names, pronouns
+4. Dialogue should be read in FIRST PERSON by the character (just the words they speak)
+5. Narration includes dialogue tags like "he said" or "she whispered"
+6. Keep segments in the exact order they appear in the text
+7. Do NOT modify the original text content
+
+Return a JSON object with this exact structure:
+{
+  "segments": [
+    {"type": "narrator", "speaker": "", "gender": "", "text": "The knight approached slowly.", "is_dialogue": false},
+    {"type": "dialogue", "speaker": "Knight", "gender": "male", "text": "Who goes there?", "is_dialogue": true},
+    {"type": "narrator", "speaker": "", "gender": "", "text": "he demanded.", "is_dialogue": false},
+    {"type": "dialogue", "speaker": "Princess", "gender": "female", "text": "It is I, the princess.", "is_dialogue": true}
+  ]
+}
+
+Return ONLY valid JSON, no other text or markdown.`
+
+	reqBody := ChatRequest{
+		Model: "gpt-4o",
+		Messages: []ChatMessage{
+			{Role: "system", Content: systemContent},
+			{Role: "user", Content: rawText},
+		},
+		Temperature: 0.3,
+		MaxTokens:   4000,
+	}
+
+	bodyBytes, _ := json.Marshal(reqBody)
+
+	req, _ := http.NewRequest("POST", openAIChatURL, bytes.NewReader(bodyBytes))
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("dialogue analysis call failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := ioutil.ReadAll(resp.Body)
+		return nil, fmt.Errorf("dialogue analysis returned %d: %s", resp.StatusCode, b)
+	}
+
+	var chatResp ChatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+		return nil, fmt.Errorf("decode dialogue analysis JSON: %w", err)
+	}
+	if len(chatResp.Choices) == 0 {
+		return nil, errors.New("no dialogue analysis choices returned")
+	}
+
+	// Parse the JSON response
+	responseText := strings.TrimSpace(chatResp.Choices[0].Message.Content)
+	// Remove any markdown code block markers
+	responseText = strings.TrimPrefix(responseText, "```json")
+	responseText = strings.TrimPrefix(responseText, "```")
+	responseText = strings.TrimSuffix(responseText, "```")
+	responseText = strings.TrimSpace(responseText)
+
+	var analysis DialogueAnalysis
+	if err := json.Unmarshal([]byte(responseText), &analysis); err != nil {
+		log.Printf("⚠️ Failed to parse dialogue analysis, using fallback: %v", err)
+		// Fallback: return entire text as narrator segment
+		return []DialogueSegment{{
+			Type:       "narrator",
+			Speaker:    "",
+			Gender:     "",
+			Text:       rawText,
+			IsDialogue: false,
+		}}, nil
+	}
+
+	log.Printf("🎭 Analyzed dialogue: %d segments found", len(analysis.Segments))
+	return analysis.Segments, nil
+}
+
+// getVoiceForSegment returns the appropriate voice based on segment type and gender
+func getVoiceForSegment(segment DialogueSegment) string {
+	if !segment.IsDialogue || segment.Type == "narrator" {
+		return VoiceNarrator
+	}
+
+	switch strings.ToLower(segment.Gender) {
+	case "male":
+		return VoiceMale
+	case "female":
+		return VoiceFemale
+	default:
+		return VoiceNarrator
+	}
+}
+
+// getInstructionsForSegment returns voice instructions based on segment type
+func getInstructionsForSegment(segment DialogueSegment) string {
+	if segment.IsDialogue {
+		switch strings.ToLower(segment.Gender) {
+		case "male":
+			return `You are voicing a male character in an audiobook. Speak in FIRST PERSON as this character:
+- Use a natural male speaking voice
+- Convey the character's emotions through tone
+- Speak as if YOU are this character saying these words
+- Be expressive and dramatic when appropriate`
+		case "female":
+			return `You are voicing a female character in an audiobook. Speak in FIRST PERSON as this character:
+- Use a natural female speaking voice
+- Convey the character's emotions through tone
+- Speak as if YOU are this character saying these words
+- Be expressive and dramatic when appropriate`
+		default:
+			return `You are voicing a character in an audiobook. Speak in FIRST PERSON:
+- Convey emotions through your tone
+- Be expressive and natural`
+		}
+	}
+
+	// Narrator instructions
+	return `You are an audiobook narrator. Read with expression:
+- Pause naturally at sentence endings
+- Use varied pacing for different moods
+- Maintain a clear, engaging narration style`
+}
+
+// generateSegmentAudio generates audio for a single dialogue segment
+func generateSegmentAudio(segment DialogueSegment, bookID uint, segmentIndex int) (string, error) {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		return "", errors.New("OPENAI_API_KEY not set")
+	}
+
+	text := cleanupForTTS(segment.Text)
+	if strings.TrimSpace(text) == "" {
+		return "", nil // Skip empty segments
+	}
+
+	voice := getVoiceForSegment(segment)
+	instructions := getInstructionsForSegment(segment)
+
+	log.Printf("🎙️ Generating segment %d: voice=%s, type=%s, speaker=%s", segmentIndex, voice, segment.Type, segment.Speaker)
+
+	payload := TTSPayload{
+		Input:          text,
+		Model:          "gpt-4o-mini-tts",
+		Voice:          voice,
+		Instructions:   instructions,
+		ResponseFormat: "mp3",
+		Speed:          1.0,
+	}
+	reqBody, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest("POST", openaiTTSEndpoint, bytes.NewReader(reqBody))
+	if err != nil {
+		return "", fmt.Errorf("create TTS request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("TTS API request error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return "", fmt.Errorf("TTS API returned %d: %s", resp.StatusCode, body)
+	}
+
+	if err := os.MkdirAll("./audio", 0755); err != nil {
+		return "", err
+	}
+
+	filename := fmt.Sprintf("segment_%d_%d.mp3", bookID, segmentIndex)
+	path := "./audio/" + filename
+
+	outFile, err := os.Create(path)
+	if err != nil {
+		return "", fmt.Errorf("create audio file: %w", err)
+	}
+	defer outFile.Close()
+
+	if _, err := io.Copy(outFile, resp.Body); err != nil {
+		return "", fmt.Errorf("write audio: %w", err)
+	}
+
+	return path, nil
+}
+
+// mergeAudioSegments concatenates multiple audio files using FFmpeg
+func mergeAudioSegments(segmentPaths []string, outputPath string) error {
+	if len(segmentPaths) == 0 {
+		return errors.New("no segments to merge")
+	}
+
+	if len(segmentPaths) == 1 {
+		// Just copy the single file
+		input, err := os.ReadFile(segmentPaths[0])
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(outputPath, input, 0644)
+	}
+
+	// Create a file list for FFmpeg concat
+	listPath := "./audio/concat_list.txt"
+	var listContent strings.Builder
+	for _, path := range segmentPaths {
+		// FFmpeg concat requires escaped single quotes for paths with spaces
+		listContent.WriteString(fmt.Sprintf("file '%s'\n", path))
+	}
+	if err := os.WriteFile(listPath, []byte(listContent.String()), 0644); err != nil {
+		return fmt.Errorf("create concat list: %w", err)
+	}
+	defer os.Remove(listPath)
+
+	// Use FFmpeg to concatenate
+	cmd := exec.Command("ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outputPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ffmpeg concat failed: %w, output: %s", err, string(output))
+	}
+
+	log.Printf("✅ Merged %d segments into %s", len(segmentPaths), outputPath)
+	return nil
+}
+
+// convertTextToAudioMultiVoice converts text to audio with different voices for characters
+func convertTextToAudioMultiVoice(text string, bookID uint) (string, error) {
+	log.Printf("🎭 Starting multi-voice TTS for book %d", bookID)
+
+	// Step 1: Analyze dialogue to identify speakers and genders
+	segments, err := analyzeDialogue(text)
+	if err != nil {
+		log.Printf("⚠️ Dialogue analysis failed, falling back to single voice: %v", err)
+		return convertTextToAudioSingleVoice(text, bookID)
+	}
+
+	if len(segments) == 0 {
+		log.Printf("⚠️ No segments found, falling back to single voice")
+		return convertTextToAudioSingleVoice(text, bookID)
+	}
+
+	// Step 2: Generate audio for each segment
+	var segmentPaths []string
+	for i, segment := range segments {
+		if strings.TrimSpace(segment.Text) == "" {
+			continue
+		}
+
+		path, err := generateSegmentAudio(segment, bookID, i)
+		if err != nil {
+			log.Printf("⚠️ Failed to generate segment %d: %v", i, err)
+			continue
+		}
+		if path != "" {
+			segmentPaths = append(segmentPaths, path)
+		}
+	}
+
+	if len(segmentPaths) == 0 {
+		log.Printf("⚠️ No audio segments generated, falling back to single voice")
+		return convertTextToAudioSingleVoice(text, bookID)
+	}
+
+	// Step 3: Merge all segments into final audio
+	if err := os.MkdirAll("./audio", 0755); err != nil {
+		return "", err
+	}
+
+	finalPath := fmt.Sprintf("./audio/audio_%d.mp3", bookID)
+	if err := mergeAudioSegments(segmentPaths, finalPath); err != nil {
+		log.Printf("⚠️ Failed to merge segments: %v", err)
+		// Try to return the first segment at least
+		if len(segmentPaths) > 0 {
+			return segmentPaths[0], nil
+		}
+		return "", err
+	}
+
+	// Clean up individual segment files
+	for _, path := range segmentPaths {
+		os.Remove(path)
+	}
+
+	log.Printf("✅ Multi-voice TTS completed for book %d: %s", bookID, finalPath)
+	return finalPath, nil
+}
+
+// convertTextToAudioSingleVoice is the fallback single-voice TTS (original behavior)
+func convertTextToAudioSingleVoice(text string, bookID uint) (string, error) {
+	// Prepare text for narration
 	narratorText, err := prepareNarratorText(text)
 	if err != nil {
-		// Fall back to original text if preparation fails
 		log.Printf("⚠️ Text preparation failed, using original: %v", err)
 		narratorText = text
 	}
@@ -169,7 +494,6 @@ func convertTextToAudio(text string, bookID uint) (string, error) {
 		return "", errors.New("OPENAI_API_KEY not set")
 	}
 
-	// Use instructions to guide expressive narration instead of SSML
 	instructions := `You are an expressive audiobook narrator. Read with emotion and drama:
 - Pause naturally at sentence endings and paragraph breaks
 - Use varied pacing: slower for emotional moments, faster for action
@@ -180,7 +504,7 @@ func convertTextToAudio(text string, bookID uint) (string, error) {
 	payload := TTSPayload{
 		Input:          narratorText,
 		Model:          "gpt-4o-mini-tts",
-		Voice:          "alloy",
+		Voice:          VoiceNarrator,
 		Instructions:   instructions,
 		ResponseFormat: "mp3",
 		Speed:          1.0,
@@ -222,7 +546,15 @@ func convertTextToAudio(text string, bookID uint) (string, error) {
 	if _, err := io.Copy(outFile, resp.Body); err != nil {
 		return "", fmt.Errorf("write audio: %w", err)
 	}
+
 	return path, nil
+}
+
+// convertTextToAudio is the main entry point for TTS conversion
+// It uses multi-voice system with different voices for male/female characters
+func convertTextToAudio(text string, bookID uint) (string, error) {
+	// Use multi-voice TTS system for character dialogue
+	return convertTextToAudioMultiVoice(text, bookID)
 }
 
 func processBookConversion(book Book) {
