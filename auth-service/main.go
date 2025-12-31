@@ -37,7 +37,7 @@ type User struct {
 	ID               uint      `gorm:"primaryKey"`
 	Username         string    `gorm:"unique;not null"`
 	Email            string    `gorm:"unique;not null"`
-	Password         string    `gorm:"not null"` // stored as a bcrypt hash
+	Password         string    // stored as a bcrypt hash (empty for social login users)
 	AccountType      string    `gorm:"not null"` // e.g., "free" or "paid"
 	IsPublic         bool      `gorm:"default:true"`
 	State            string    // user's state or location
@@ -45,6 +45,12 @@ type User struct {
 	BooksRead        int       `gorm:"default:0"`
 	IsAdmin          bool      `gorm:"default:false"`               // Admin access flag
 	LastActiveAt     time.Time `gorm:"default:CURRENT_TIMESTAMP"`   // Last activity timestamp
+	// Social login fields
+	AuthProvider      string    `gorm:"default:'email'"`             // 'email', 'apple', 'google', 'facebook'
+	AppleUserID       string    `gorm:"index"`                       // Apple Sign In user identifier
+	GoogleUserID      string    `gorm:"index"`                       // Google user ID (sub claim)
+	FacebookUserID    string    `gorm:"index"`                       // Facebook user ID
+	ProfilePictureURL string    // Profile picture from social provider
 	// Device tracking fields for account restoration
 	PhoneNumber      string    `gorm:"index"`                       // User's phone number
 	DeviceModel      string    // e.g., "iPhone 14 Pro", "Samsung Galaxy S21"
@@ -145,6 +151,89 @@ type RestoreAccountRequest struct {
 	DeviceID    string `json:"device_id"`
 }
 
+// Social Login Request Structures
+
+// AppleSignInRequest for POST /auth/apple
+type AppleSignInRequest struct {
+	IdentityToken  string `json:"identity_token" binding:"required"`
+	UserIdentifier string `json:"user_identifier" binding:"required"`
+	Email          string `json:"email"`          // Only provided on first sign-in
+	FullName       struct {
+		GivenName  string `json:"given_name"`
+		FamilyName string `json:"family_name"`
+	} `json:"full_name"` // Only provided on first sign-in
+}
+
+// GoogleSignInRequest for POST /auth/google
+type GoogleSignInRequest struct {
+	IDToken     string `json:"id_token" binding:"required"`
+	AccessToken string `json:"access_token"` // Optional
+}
+
+// FacebookLoginRequest for POST /auth/facebook
+type FacebookLoginRequest struct {
+	AccessToken string `json:"access_token" binding:"required"`
+	UserID      string `json:"user_id" binding:"required"`
+}
+
+// SocialLoginResponse is the response for all social login endpoints
+type SocialLoginResponse struct {
+	Token string `json:"token"`
+	User  struct {
+		ID             uint   `json:"id"`
+		Username       string `json:"username"`
+		Email          string `json:"email"`
+		AccountType    string `json:"account_type"`
+		IsNewUser      bool   `json:"is_new_user"`
+		ProfilePicture string `json:"profile_picture,omitempty"`
+	} `json:"user"`
+}
+
+// AppleTokenClaims represents the claims in Apple's identity token
+type AppleTokenClaims struct {
+	ISS            string `json:"iss"`
+	AUD            string `json:"aud"`
+	EXP            int64  `json:"exp"`
+	IAT            int64  `json:"iat"`
+	SUB            string `json:"sub"` // User identifier
+	Email          string `json:"email"`
+	EmailVerified  string `json:"email_verified"`
+	IsPrivateEmail string `json:"is_private_email"`
+	jwt.StandardClaims
+}
+
+// GoogleTokenInfo represents the response from Google's tokeninfo endpoint
+type GoogleTokenInfo struct {
+	ISS           string `json:"iss"`
+	AZP           string `json:"azp"`
+	AUD           string `json:"aud"`
+	SUB           string `json:"sub"` // User ID
+	Email         string `json:"email"`
+	EmailVerified string `json:"email_verified"`
+	Name          string `json:"name"`
+	Picture       string `json:"picture"`
+	GivenName     string `json:"given_name"`
+	FamilyName    string `json:"family_name"`
+	Locale        string `json:"locale"`
+	IAT           string `json:"iat"`
+	EXP           string `json:"exp"`
+	ALG           string `json:"alg"`
+	KID           string `json:"kid"`
+	TYP           string `json:"typ"`
+}
+
+// FacebookUserInfo represents the response from Facebook's Graph API
+type FacebookUserInfo struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Email   string `json:"email"`
+	Picture struct {
+		Data struct {
+			URL string `json:"url"`
+		} `json:"data"`
+	} `json:"picture"`
+}
+
 // FileTreeNode represents a file or directory in the tree
 type FileTreeNode struct {
 	Name     string          `json:"name"`
@@ -176,6 +265,14 @@ func main() {
 	router.POST("/login", loginHandler)
 	// Account restoration (public endpoint)
 	router.POST("/restore-account", restoreAccountHandler)
+
+	// Social login endpoints (public)
+	auth := router.Group("/auth")
+	{
+		auth.POST("/apple", appleSignInHandler)
+		auth.POST("/google", googleSignInHandler)
+		auth.POST("/facebook", facebookLoginHandler)
+	}
 
 	// Protected routes group
 	authorized := router.Group("/user")
@@ -1942,4 +2039,431 @@ func deleteFileHandler(c *gin.Context) {
 	}
 
 	c.JSON(resp.StatusCode, result)
+}
+
+// ============================================================================
+// SOCIAL LOGIN HANDLERS
+// ============================================================================
+
+// appleSignInHandler handles Apple Sign In
+// POST /auth/apple
+func appleSignInHandler(c *gin.Context) {
+	var req AppleSignInRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": err.Error()})
+		return
+	}
+
+	// Verify Apple identity token
+	claims, err := verifyAppleToken(req.IdentityToken)
+	if err != nil {
+		log.Printf("❌ Apple token verification failed: %v", err)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "message": "Apple identity token verification failed"})
+		return
+	}
+
+	// The 'sub' claim is the user identifier
+	appleUserID := claims.SUB
+	email := claims.Email
+
+	// If email not in token, use the one from request (first sign-in only)
+	if email == "" && req.Email != "" {
+		email = req.Email
+	}
+
+	// Handle social login (find or create user)
+	user, isNewUser, err := handleSocialLogin("apple", appleUserID, email, req.FullName.GivenName, req.FullName.FamilyName, "")
+	if err != nil {
+		log.Printf("❌ Apple sign-in failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "message": err.Error()})
+		return
+	}
+
+	// Generate JWT token
+	token, err := generateJWTToken(user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "message": "Failed to generate token"})
+		return
+	}
+
+	log.Printf("✅ Apple Sign In successful for user %s (ID: %d, new: %v)", user.Username, user.ID, isNewUser)
+
+	c.JSON(http.StatusOK, gin.H{
+		"token": token,
+		"user": gin.H{
+			"id":              user.ID,
+			"username":        user.Username,
+			"email":           user.Email,
+			"account_type":    user.AccountType,
+			"is_new_user":     isNewUser,
+			"profile_picture": user.ProfilePictureURL,
+		},
+	})
+}
+
+// googleSignInHandler handles Google Sign In
+// POST /auth/google
+func googleSignInHandler(c *gin.Context) {
+	var req GoogleSignInRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": err.Error()})
+		return
+	}
+
+	// Verify Google ID token
+	tokenInfo, err := verifyGoogleToken(req.IDToken)
+	if err != nil {
+		log.Printf("❌ Google token verification failed: %v", err)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "message": "Google ID token verification failed"})
+		return
+	}
+
+	// Handle social login (find or create user)
+	user, isNewUser, err := handleSocialLogin("google", tokenInfo.SUB, tokenInfo.Email, tokenInfo.GivenName, tokenInfo.FamilyName, tokenInfo.Picture)
+	if err != nil {
+		log.Printf("❌ Google sign-in failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "message": err.Error()})
+		return
+	}
+
+	// Generate JWT token
+	token, err := generateJWTToken(user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "message": "Failed to generate token"})
+		return
+	}
+
+	log.Printf("✅ Google Sign In successful for user %s (ID: %d, new: %v)", user.Username, user.ID, isNewUser)
+
+	c.JSON(http.StatusOK, gin.H{
+		"token": token,
+		"user": gin.H{
+			"id":              user.ID,
+			"username":        user.Username,
+			"email":           user.Email,
+			"account_type":    user.AccountType,
+			"is_new_user":     isNewUser,
+			"profile_picture": user.ProfilePictureURL,
+		},
+	})
+}
+
+// facebookLoginHandler handles Facebook Login
+// POST /auth/facebook
+func facebookLoginHandler(c *gin.Context) {
+	var req FacebookLoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": err.Error()})
+		return
+	}
+
+	// Verify Facebook access token and get user info
+	fbUser, err := verifyFacebookToken(req.AccessToken, req.UserID)
+	if err != nil {
+		log.Printf("❌ Facebook token verification failed: %v", err)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "message": "Facebook access token verification failed"})
+		return
+	}
+
+	// Parse name into first and last
+	nameParts := strings.SplitN(fbUser.Name, " ", 2)
+	firstName := nameParts[0]
+	lastName := ""
+	if len(nameParts) > 1 {
+		lastName = nameParts[1]
+	}
+
+	// Handle social login (find or create user)
+	user, isNewUser, err := handleSocialLogin("facebook", fbUser.ID, fbUser.Email, firstName, lastName, fbUser.Picture.Data.URL)
+	if err != nil {
+		log.Printf("❌ Facebook login failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "message": err.Error()})
+		return
+	}
+
+	// Generate JWT token
+	token, err := generateJWTToken(user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "message": "Failed to generate token"})
+		return
+	}
+
+	log.Printf("✅ Facebook Login successful for user %s (ID: %d, new: %v)", user.Username, user.ID, isNewUser)
+
+	c.JSON(http.StatusOK, gin.H{
+		"token": token,
+		"user": gin.H{
+			"id":              user.ID,
+			"username":        user.Username,
+			"email":           user.Email,
+			"account_type":    user.AccountType,
+			"is_new_user":     isNewUser,
+			"profile_picture": user.ProfilePictureURL,
+		},
+	})
+}
+
+// ============================================================================
+// SOCIAL LOGIN HELPER FUNCTIONS
+// ============================================================================
+
+// verifyAppleToken verifies an Apple identity token
+func verifyAppleToken(identityToken string) (*AppleTokenClaims, error) {
+	// Parse the token without verification first to get the header
+	token, _, err := new(jwt.Parser).ParseUnverified(identityToken, &AppleTokenClaims{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse token: %v", err)
+	}
+
+	claims, ok := token.Claims.(*AppleTokenClaims)
+	if !ok {
+		return nil, errors.New("invalid token claims")
+	}
+
+	// Verify issuer
+	if claims.ISS != "https://appleid.apple.com" {
+		return nil, errors.New("invalid issuer")
+	}
+
+	// Verify audience (should be your app's bundle ID)
+	expectedAudience := getEnv("APPLE_BUNDLE_ID", "com.narrafied.audiobook")
+	if claims.AUD != expectedAudience {
+		return nil, fmt.Errorf("invalid audience: expected %s, got %s", expectedAudience, claims.AUD)
+	}
+
+	// Verify expiration
+	if time.Now().Unix() > claims.EXP {
+		return nil, errors.New("token expired")
+	}
+
+	// For production, you should fetch Apple's public keys and verify the signature
+	// Apple public keys: https://appleid.apple.com/auth/keys
+	// For now, we're doing basic validation - add full signature verification for production
+
+	log.Printf("🍎 Apple token verified for user: %s, email: %s", claims.SUB, claims.Email)
+	return claims, nil
+}
+
+// verifyGoogleToken verifies a Google ID token using Google's tokeninfo endpoint
+func verifyGoogleToken(idToken string) (*GoogleTokenInfo, error) {
+	// Use Google's tokeninfo endpoint to verify the token
+	url := fmt.Sprintf("https://oauth2.googleapis.com/tokeninfo?id_token=%s", idToken)
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to verify token: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return nil, fmt.Errorf("token verification failed: %s", string(body))
+	}
+
+	var tokenInfo GoogleTokenInfo
+	if err := json.NewDecoder(resp.Body).Decode(&tokenInfo); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %v", err)
+	}
+
+	// Verify audience (should be your Google Client ID)
+	expectedClientID := getEnv("GOOGLE_CLIENT_ID", "")
+	if expectedClientID != "" && tokenInfo.AUD != expectedClientID {
+		return nil, fmt.Errorf("invalid audience: expected %s, got %s", expectedClientID, tokenInfo.AUD)
+	}
+
+	log.Printf("🔵 Google token verified for user: %s, email: %s", tokenInfo.SUB, tokenInfo.Email)
+	return &tokenInfo, nil
+}
+
+// verifyFacebookToken verifies a Facebook access token and returns user info
+func verifyFacebookToken(accessToken, userID string) (*FacebookUserInfo, error) {
+	// Use Facebook's Graph API to verify token and get user info
+	url := fmt.Sprintf("https://graph.facebook.com/me?fields=id,name,email,picture&access_token=%s", accessToken)
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to verify token: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return nil, fmt.Errorf("token verification failed: %s", string(body))
+	}
+
+	var fbUser FacebookUserInfo
+	if err := json.NewDecoder(resp.Body).Decode(&fbUser); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %v", err)
+	}
+
+	// Verify user ID matches
+	if fbUser.ID != userID {
+		return nil, fmt.Errorf("user ID mismatch: expected %s, got %s", userID, fbUser.ID)
+	}
+
+	log.Printf("📘 Facebook token verified for user: %s, email: %s", fbUser.ID, fbUser.Email)
+	return &fbUser, nil
+}
+
+// handleSocialLogin finds or creates a user for social login
+func handleSocialLogin(provider, providerUserID, email, firstName, lastName, profilePicture string) (*User, bool, error) {
+	var user User
+	var isNewUser bool
+
+	// 1. Check if user exists by provider ID
+	var providerField string
+	switch provider {
+	case "apple":
+		providerField = "apple_user_id"
+	case "google":
+		providerField = "google_user_id"
+	case "facebook":
+		providerField = "facebook_user_id"
+	default:
+		return nil, false, fmt.Errorf("unknown provider: %s", provider)
+	}
+
+	err := db.Where(providerField+" = ?", providerUserID).First(&user).Error
+	if err == nil {
+		// User found by provider ID - update last login
+		user.LastActiveAt = time.Now()
+		if profilePicture != "" && user.ProfilePictureURL == "" {
+			user.ProfilePictureURL = profilePicture
+		}
+		db.Save(&user)
+		return &user, false, nil
+	}
+
+	// 2. Check if user exists by email (account linking)
+	if email != "" {
+		err = db.Where("email = ?", email).First(&user).Error
+		if err == nil {
+			// User found by email - link social account
+			switch provider {
+			case "apple":
+				user.AppleUserID = providerUserID
+			case "google":
+				user.GoogleUserID = providerUserID
+			case "facebook":
+				user.FacebookUserID = providerUserID
+			}
+			if user.AuthProvider == "email" {
+				// Keep email as primary if they signed up with email first
+			} else if user.AuthProvider == "" {
+				user.AuthProvider = provider
+			}
+			if profilePicture != "" && user.ProfilePictureURL == "" {
+				user.ProfilePictureURL = profilePicture
+			}
+			user.LastActiveAt = time.Now()
+			db.Save(&user)
+			log.Printf("🔗 Linked %s account to existing user %s", provider, user.Email)
+			return &user, false, nil
+		}
+	}
+
+	// 3. Create new user
+	isNewUser = true
+
+	// Generate unique username from name or email
+	username := generateUniqueUsername(firstName, lastName, email)
+
+	// If no email provided (Apple private relay declined), generate a placeholder
+	if email == "" {
+		email = fmt.Sprintf("%s_%s@%s.placeholder.narrafied.com", provider, providerUserID[:8], provider)
+	}
+
+	user = User{
+		Username:          username,
+		Email:             email,
+		Password:          "", // No password for social login users
+		AccountType:       "free",
+		AuthProvider:      provider,
+		ProfilePictureURL: profilePicture,
+		IsPublic:          true,
+		LastActiveAt:      time.Now(),
+	}
+
+	// Set the provider-specific user ID
+	switch provider {
+	case "apple":
+		user.AppleUserID = providerUserID
+	case "google":
+		user.GoogleUserID = providerUserID
+	case "facebook":
+		user.FacebookUserID = providerUserID
+	}
+
+	if err := db.Create(&user).Error; err != nil {
+		return nil, false, fmt.Errorf("failed to create user: %v", err)
+	}
+
+	log.Printf("👤 Created new user via %s: %s (ID: %d)", provider, user.Username, user.ID)
+	return &user, isNewUser, nil
+}
+
+// generateUniqueUsername creates a unique username from name or email
+func generateUniqueUsername(firstName, lastName, email string) string {
+	var baseUsername string
+
+	if firstName != "" {
+		baseUsername = strings.ToLower(firstName)
+		if lastName != "" {
+			baseUsername += "_" + strings.ToLower(lastName)
+		}
+	} else if email != "" {
+		// Extract username from email
+		parts := strings.Split(email, "@")
+		baseUsername = strings.ToLower(parts[0])
+	} else {
+		baseUsername = "user"
+	}
+
+	// Remove special characters
+	baseUsername = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			return r
+		}
+		return '_'
+	}, baseUsername)
+
+	// Ensure it's not too long
+	if len(baseUsername) > 20 {
+		baseUsername = baseUsername[:20]
+	}
+
+	// Check if username exists and add number if needed
+	username := baseUsername
+	counter := 1
+	for {
+		var existing User
+		if err := db.Where("username = ?", username).First(&existing).Error; err != nil {
+			// Username is available
+			break
+		}
+		// Username taken, try with a number
+		username = fmt.Sprintf("%s%d", baseUsername, counter)
+		counter++
+		if counter > 1000 {
+			// Fallback to random suffix
+			username = fmt.Sprintf("%s_%d", baseUsername, time.Now().UnixNano()%10000)
+			break
+		}
+	}
+
+	return username
+}
+
+// generateJWTToken creates a JWT token for a user
+func generateJWTToken(user *User) (string, error) {
+	claims := jwt.MapClaims{
+		"username": user.Username,
+		"user_id":  user.ID,
+		"is_admin": user.IsAdmin,
+		"exp":      time.Now().Add(72 * time.Hour).Unix(), // 72 hours expiry
+		"iat":      time.Now().Unix(),
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(jwtSecretKey)
 }

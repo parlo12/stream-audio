@@ -11,6 +11,7 @@
 3. [TypeScript Types](#typescript-types)
 4. [API Endpoints](#api-endpoints)
    - [Auth & User Management](#auth--user-management)
+   - [Social Login](#social-login) ✨ NEW
    - [Book Management](#book-management)
    - [File Upload](#file-upload)
    - [TTS Processing](#tts-processing)
@@ -469,6 +470,143 @@ localStorage.setItem('token', token);
 
 **Errors:**
 - `401`: Invalid username or password
+
+---
+
+### Social Login
+
+#### POST /auth/apple
+Sign in with Apple. The iOS app handles Apple authentication and sends the identity token.
+
+```typescript
+// Request
+const response = await fetch('/auth/apple', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    identity_token: 'eyJraWQ...',        // JWT from Apple
+    user_identifier: '001234.abcd...',   // Apple user ID
+    email: 'user@privaterelay.appleid.com', // May be null after first login
+    full_name: {
+      given_name: 'John',
+      family_name: 'Doe'
+    } // Only provided on FIRST sign-in
+  })
+});
+
+// Response (Success)
+{
+  token: "your_jwt_token_here",
+  user: {
+    id: 123,
+    username: "john_doe",
+    email: "user@privaterelay.appleid.com",
+    account_type: "free",
+    is_new_user: true,
+    profile_picture: ""
+  }
+}
+```
+
+**Notes:**
+- Email and name are only provided by Apple on the **first sign-in**
+- Users can hide their real email (you'll get a private relay address)
+- Store email immediately on first sign-in as Apple won't send it again
+
+**Errors:**
+- `400`: Invalid request (missing identity_token or user_identifier)
+- `401`: Token verification failed or expired
+
+---
+
+#### POST /auth/google
+Sign in with Google. The iOS app handles Google authentication and sends the ID token.
+
+```typescript
+// Request
+const response = await fetch('/auth/google', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    id_token: 'eyJhbG...',    // JWT from Google
+    access_token: 'ya29...'   // Optional, for additional API calls
+  })
+});
+
+// Response (Success)
+{
+  token: "your_jwt_token_here",
+  user: {
+    id: 123,
+    username: "john_doe",
+    email: "john@gmail.com",
+    account_type: "free",
+    is_new_user: false,
+    profile_picture: "https://lh3.googleusercontent.com/..."
+  }
+}
+```
+
+**Errors:**
+- `400`: Invalid request (missing id_token)
+- `401`: Token verification failed
+
+---
+
+#### POST /auth/facebook
+Login with Facebook. The iOS app handles Facebook authentication and sends the access token.
+
+```typescript
+// Request
+const response = await fetch('/auth/facebook', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    access_token: 'EAABsbCS...',  // Access token from Facebook
+    user_id: '1234567890'         // Facebook user ID
+  })
+});
+
+// Response (Success)
+{
+  token: "your_jwt_token_here",
+  user: {
+    id: 123,
+    username: "john_doe",
+    email: "john@facebook.com",
+    account_type: "free",
+    is_new_user: true,
+    profile_picture: "https://graph.facebook.com/..."
+  }
+}
+```
+
+**Errors:**
+- `400`: Invalid request (missing access_token or user_id)
+- `401`: Token verification failed or user ID mismatch
+
+---
+
+### Social Login Response Type
+
+```typescript
+interface SocialLoginResponse {
+  token: string;
+  user: {
+    id: number;
+    username: string;
+    email: string;
+    account_type: 'free' | 'paid';
+    is_new_user: boolean;
+    profile_picture?: string;
+  };
+}
+
+interface SocialLoginError {
+  error: 'invalid_request' | 'invalid_token' | 'token_expired' | 'server_error';
+  message: string;
+}
+```
 
 ---
 
@@ -1552,6 +1690,10 @@ GET /user/payment-history
 | POST | `/user/activity/ping` | Yes | Update last activity | ✅ |
 | POST | `/user/deactivate` | Yes | Temporarily deactivate account | ✅ |
 | POST | `/user/delete` | Yes | Permanently delete account | ✅ |
+| **Social Login** |
+| POST | `/auth/apple` | No | Sign in with Apple | ✅ NEW |
+| POST | `/auth/google` | No | Sign in with Google | ✅ NEW |
+| POST | `/auth/facebook` | No | Login with Facebook | ✅ NEW |
 | **Books** |
 | POST | `/user/books` | Yes | Create new book | ✅ |
 | GET | `/user/books` | Yes | List user's books | ✅ |
