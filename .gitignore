@@ -3,3 +3,8 @@
 .env
 .env*
 !.env.example
+
+# local backups and logs
+*.backup
+logs/
+.DS_Store

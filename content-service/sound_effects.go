@@ -294,52 +294,110 @@ func generateSegmentInstructions(ttsDur float64, bookPath string) ([]Segment, er
 	return segs, nil
 }
 
-// generateDynamicBackgroundWithSegments “stretches” the 22s clip.
+// moodToVolume maps mood to dynamic volume level for background music
+var moodToVolume = map[string]float64{
+	"suspense": 0.25,
+	"action":   0.35,
+	"climax":   0.40,
+	"sad":      0.20,
+	"neutral":  0.25,
+}
+
+// generateDynamicBackgroundWithSegments creates background music with smooth crossfade transitions
 func generateDynamicBackgroundWithSegments(ttsDur float64, bgPath string, segs []Segment) (string, error) {
-	var files []string
+	if len(segs) == 0 {
+		return "", errors.New("no segments provided")
+	}
+
+	// Generate individual segment clips with mood-appropriate volumes
+	var segmentPaths []string
 	for i, s := range segs {
 		segDur := s.End - s.Start
 		if segDur <= 0 {
 			continue
 		}
+
+		// Get volume for this mood
+		vol := moodToVolume[s.Mood]
+		if vol == 0 {
+			vol = 0.25 // default
+		}
+
 		out := fmt.Sprintf("./dyn_seg_%d.ogg", i)
-		total := s.Start + segDur
-		delay := int(s.Start * 1000)
-		delayStr := fmt.Sprintf("%d|%d", delay, delay)
+
+		// Create segment with appropriate duration and volume
+		// Add 0.5s extra for crossfade overlap
+		actualDur := segDur
+		if i < len(segs)-1 {
+			actualDur += 0.5 // overlap for crossfade
+		}
 
 		cmd := exec.Command("ffmpeg", "-y",
 			"-stream_loop", "-1", "-i", bgPath,
-			"-t", fmt.Sprintf("%.2f", total),
-			"-af", fmt.Sprintf("adelay=%s,volume=0.30", delayStr),
+			"-t", fmt.Sprintf("%.2f", actualDur),
+			"-af", fmt.Sprintf("volume=%.2f", vol),
+			"-c:a", "libopus", "-b:a", "64k",
 			out,
 		)
 		if o, err := cmd.CombinedOutput(); err != nil {
 			return "", fmt.Errorf("segment %d fail: %v\n%s", i, err, o)
 		}
-		files = append(files, out)
+		segmentPaths = append(segmentPaths, out)
+		log.Printf("🎵 [Music] Segment %d: %.2fs at %.0f%% volume (mood: %s)", i, segDur, vol*100, s.Mood)
 	}
 
-	// write concat list
-	list := "./dyn_list.txt"
-	f, _ := os.Create(list)
-	for _, fn := range files {
-		fmt.Fprintf(f, "file '%s'\n", fn)
-	}
-	f.Close()
-
-	staged := "./audio/dynamic_bg_staged.ogg"
-	if o, err := exec.Command("ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list, "-c", "copy", staged).CombinedOutput(); err != nil {
-		return "", fmt.Errorf("concat fail: %v\n%s", err, o)
+	if len(segmentPaths) == 0 {
+		return "", errors.New("no valid segments generated")
 	}
 
+	// If only one segment, just use it directly
+	if len(segmentPaths) == 1 {
+		finalBg := "./audio/dynamic_background_final.ogg"
+		if o, err := exec.Command("ffmpeg", "-y", "-i", segmentPaths[0],
+			"-af", fmt.Sprintf("atrim=duration=%.2f,afade=t=in:st=0:d=1,afade=t=out:st=%.2f:d=2", ttsDur, ttsDur-2),
+			"-c:a", "libopus", "-b:a", "64k",
+			finalBg,
+		).CombinedOutput(); err != nil {
+			return "", fmt.Errorf("single segment trim fail: %v\n%s", err, o)
+		}
+		return finalBg, nil
+	}
+
+	// Use crossfade to merge segments smoothly
+	// Build complex filter for crossfading multiple segments
+	currentInput := segmentPaths[0]
+	for i := 1; i < len(segmentPaths); i++ {
+		tempOutput := fmt.Sprintf("./dyn_crossfade_%d.ogg", i)
+		crossfadeDur := 0.5 // 0.5 second crossfade
+
+		cmd := exec.Command("ffmpeg", "-y",
+			"-i", currentInput,
+			"-i", segmentPaths[i],
+			"-filter_complex", fmt.Sprintf("[0:a][1:a]acrossfade=d=%.1f:c1=tri:c2=tri[out]", crossfadeDur),
+			"-map", "[out]",
+			"-c:a", "libopus", "-b:a", "64k",
+			tempOutput,
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("⚠️ [Music] Crossfade %d failed: %v\n%s", i, err, out)
+			// Fallback to simple concat if crossfade fails
+			break
+		}
+		currentInput = tempOutput
+		log.Printf("🎵 [Music] Crossfade transition %d complete", i)
+	}
+
+	// Apply final trim and fade out
 	finalBg := "./audio/dynamic_background_final.ogg"
-	if o, err := exec.Command("ffmpeg", "-y", "-i", staged,
-		"-af", fmt.Sprintf("atrim=duration=%.2f", ttsDur),
+	if o, err := exec.Command("ffmpeg", "-y", "-i", currentInput,
+		"-af", fmt.Sprintf("atrim=duration=%.2f,afade=t=in:st=0:d=1,afade=t=out:st=%.2f:d=2", ttsDur, ttsDur-2),
 		"-c:a", "libopus", "-b:a", "64k",
 		finalBg,
 	).CombinedOutput(); err != nil {
-		return "", fmt.Errorf("trim fail: %v\n%s", err, o)
+		return "", fmt.Errorf("final trim fail: %v\n%s", err, o)
 	}
+
+	log.Printf("✅ [Music] Dynamic background with crossfades: %s (%.2fs)", finalBg, ttsDur)
 	return finalBg, nil
 }
 
@@ -352,16 +410,17 @@ func computeContentHash(filePath string) (string, error) {
 	return fmt.Sprintf("%x", sum), nil
 }
 
-// mergeAudio overlays TTS narration with the dynamic background.
-
+// mergeAudio overlays TTS narration with dynamic background music AND ambient soundscape
+// Audio layers: TTS (1.0) + Background Music (dynamic) + Ambient Soundscape (0.08-0.18)
 func mergeAudio(ttsPath, bgPath string, book Book, pageIndex int, bookPath string, hash string) (string, error) {
 	out, err := exec.Command("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", ttsPath).Output()
 	if err != nil {
 		return "", fmt.Errorf("ffprobe: %w", err)
 	}
 	dur, _ := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
-	log.Printf("TTS duration: %.2f", dur)
+	log.Printf("🎙️ [Mix] TTS duration: %.2f seconds", dur)
 
+	// Generate mood segments with crossfade transitions
 	segs, err := generateSegmentInstructions(dur, bookPath)
 	if err != nil {
 		return "", err
@@ -372,21 +431,65 @@ func mergeAudio(ttsPath, bgPath string, book Book, pageIndex int, bookPath strin
 	}
 
 	outFile := fmt.Sprintf("./audio/book_%d_page_%d_%s.mp3", book.ID, pageIndex, hash[:8])
-	filterComplex := "[0:a]volume=1.0[a0];[1:a]volume=0.3[a1];[a0][a1]amix=inputs=2:duration=longest[aout]"
 
-	cmd := exec.Command("ffmpeg", "-y",
-		"-i", ttsPath,
-		"-i", dynBg,
-		"-filter_complex", filterComplex,
-		"-map", "[aout]",
-		"-c:a", "libmp3lame",
-		"-q:a", "2",
-		outFile,
-	)
+	// Try to detect and generate ambient soundscape
+	ambientPath := ""
+	ambientSetting, err := detectAmbientSetting(bookPath)
+	if err != nil {
+		log.Printf("⚠️ [Mix] Ambient detection failed: %v, continuing without ambient", err)
+	} else if ambientSetting.Setting != "neutral" || ambientSetting.Intensity > 0.3 {
+		// Generate ambient soundscape
+		rawAmbient, err := generateAmbientSoundscape(ambientSetting, book.ID)
+		if err != nil {
+			log.Printf("⚠️ [Mix] Ambient generation failed: %v", err)
+		} else {
+			// Loop ambient to match TTS duration
+			loopedAmbient, err := loopAmbientToLength(rawAmbient, dur, ambientSetting.Intensity, book.ID, pageIndex)
+			if err != nil {
+				log.Printf("⚠️ [Mix] Ambient loop failed: %v", err)
+			} else {
+				ambientPath = loopedAmbient
+				log.Printf("🌲 [Mix] Ambient layer ready: %s (setting: %s)", ambientPath, ambientSetting.Setting)
+			}
+		}
+	} else {
+		log.Printf("🌲 [Mix] Skipping ambient (neutral setting with low intensity)")
+	}
+
+	var cmd *exec.Cmd
+	if ambientPath != "" {
+		// 3-layer mix: TTS + Music + Ambient
+		filterComplex := "[0:a]volume=1.0[tts];[1:a][tts]amix=inputs=2:duration=first[mix1];[2:a][mix1]amix=inputs=2:duration=first[aout]"
+		cmd = exec.Command("ffmpeg", "-y",
+			"-i", ttsPath,
+			"-i", dynBg,
+			"-i", ambientPath,
+			"-filter_complex", filterComplex,
+			"-map", "[aout]",
+			"-c:a", "libmp3lame",
+			"-q:a", "2",
+			outFile,
+		)
+		log.Printf("🎚️ [Mix] 3-layer mix: TTS + Music + Ambient")
+	} else {
+		// 2-layer mix: TTS + Music (original behavior)
+		filterComplex := "[0:a]volume=1.0[a0];[1:a][a0]amix=inputs=2:duration=first[aout]"
+		cmd = exec.Command("ffmpeg", "-y",
+			"-i", ttsPath,
+			"-i", dynBg,
+			"-filter_complex", filterComplex,
+			"-map", "[aout]",
+			"-c:a", "libmp3lame",
+			"-q:a", "2",
+			outFile,
+		)
+		log.Printf("🎚️ [Mix] 2-layer mix: TTS + Music")
+	}
+
 	if o, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("ffmpeg merge: %v\n%s", err, o)
 	}
-	log.Printf("Merged into %s", outFile)
+	log.Printf("✅ [Mix] Merged into %s", outFile)
 	return outFile, nil
 }
 
@@ -407,6 +510,246 @@ func getTTSDuration(path string) (float64, error) {
 }
 
 // -------------------- NEW: sound-event extraction & Foley overlay --------------------
+
+// -------------------- AMBIENT SOUNDSCAPE SYSTEM --------------------
+
+// AmbientSetting represents detected scene environment
+type AmbientSetting struct {
+	Setting     string  `json:"setting"`
+	Intensity   float64 `json:"intensity"` // 0.0-1.0 how prominent the ambient should be
+	Description string  `json:"description"`
+}
+
+// ambientPrompts contains loopable ambient soundscape prompts
+var ambientPrompts = map[string]string{
+	// Indoor environments
+	"tavern":       "Busy medieval tavern ambiance, distant conversations, clinking glasses, crackling fireplace, warm atmosphere, seamless loop, 15 seconds",
+	"castle":       "Stone castle interior ambiance, distant echoing footsteps, torch flames flickering, subtle wind through corridors, 15 seconds",
+	"dungeon":      "Dark dungeon atmosphere, dripping water echoes, distant chains rattling, cold stone reverb, ominous low tone, 15 seconds",
+	"library":      "Quiet library ambiance, pages turning, soft clock ticking, gentle creaking wood, hushed atmosphere, 15 seconds",
+	"throne_room":  "Grand throne room ambiance, echo in large stone chamber, distant murmurs, torches crackling, regal atmosphere, 15 seconds",
+	"church":       "Cathedral interior ambiance, soft organ drone, reverberant space, candles flickering, sacred atmosphere, 15 seconds",
+	"ship_cabin":   "Wooden ship cabin, creaking timbers, waves against hull, gentle swaying, nautical atmosphere, 15 seconds",
+
+	// Outdoor environments
+	"forest":       "Deep forest ambiance, birdsong, gentle wind through leaves, distant stream, peaceful nature sounds, seamless loop, 15 seconds",
+	"forest_night": "Nighttime forest ambiance, crickets chirping, owl hooting, rustling leaves, mysterious atmosphere, 15 seconds",
+	"meadow":       "Open meadow ambiance, wind through tall grass, buzzing insects, distant birds, peaceful countryside, 15 seconds",
+	"mountain":     "Mountain peak atmosphere, strong wind, distant eagle cry, vast open space, majestic ambiance, 15 seconds",
+	"swamp":        "Murky swamp ambiance, frogs croaking, insects buzzing, bubbling water, oppressive humid atmosphere, 15 seconds",
+	"desert":       "Desert ambiance, howling wind, shifting sand, distant heat haze, desolate atmosphere, 15 seconds",
+	"ocean":        "Ocean shore ambiance, waves crashing on beach, seagulls calling, salty breeze, coastal atmosphere, 15 seconds",
+	"river":        "Flowing river ambiance, rushing water, birds chirping, peaceful nature, calming atmosphere, 15 seconds",
+
+	// Urban environments
+	"marketplace":  "Medieval marketplace ambiance, crowd chatter, merchants calling, carts rolling, busy trading atmosphere, 15 seconds",
+	"city_street":  "Old city street ambiance, distant conversations, footsteps on cobblestones, horse carriages, urban bustle, 15 seconds",
+	"village":      "Small village ambiance, roosters crowing, dogs barking, children playing, peaceful rural life, 15 seconds",
+	"harbor":       "Harbor dockside ambiance, ships creaking, seagulls, waves lapping, sailors working, maritime atmosphere, 15 seconds",
+
+	// Weather/atmospheric
+	"storm":        "Thunderstorm ambiance, heavy rain, rolling thunder, wind gusts, dramatic weather, 15 seconds",
+	"rain":         "Gentle rain ambiance, steady rainfall, occasional distant thunder, peaceful rainy day, 15 seconds",
+	"snowfall":     "Winter snowfall ambiance, muffled silence, gentle wind, cold atmosphere, peaceful winter, 15 seconds",
+	"fog":          "Foggy atmosphere, muffled sounds, dripping moisture, eerie stillness, mysterious ambiance, 15 seconds",
+
+	// Special/fantasy
+	"battlefield":  "Distant battlefield ambiance, faraway clashing metal, war drums, war horns, tension building, 15 seconds",
+	"cave":         "Cave interior ambiance, dripping water echoes, wind through passages, deep reverb, mysterious underground, 15 seconds",
+	"graveyard":    "Eerie graveyard ambiance, wind through dead trees, creaking gates, crows cawing, ominous atmosphere, 15 seconds",
+	"magic":        "Mystical magical ambiance, soft ethereal tones, sparkling energy, otherworldly hums, fantasy atmosphere, 15 seconds",
+
+	// Default/neutral
+	"neutral":      "Soft room tone ambiance, very subtle background air, gentle presence, neutral atmosphere, 15 seconds",
+}
+
+// detectAmbientSetting uses GPT to analyze text and identify the scene setting
+func detectAmbientSetting(bookPath string) (*AmbientSetting, error) {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		return nil, errors.New("OPENAI_API_KEY not set")
+	}
+
+	raw, err := os.ReadFile(bookPath)
+	if err != nil {
+		return nil, err
+	}
+	text := string(raw)
+	if len(text) > 1000 {
+		text = text[:1000]
+	}
+
+	// Build list of available settings
+	settingsList := make([]string, 0, len(ambientPrompts))
+	for setting := range ambientPrompts {
+		settingsList = append(settingsList, setting)
+	}
+
+	prompt := fmt.Sprintf(`You are an expert audio designer for audiobook production. Analyze this text and identify the PRIMARY scene setting/environment.
+
+TEXT:
+%s
+
+AVAILABLE SETTINGS (choose ONE):
+%s
+
+RULES:
+1. Choose the setting that best matches where the scene takes place
+2. If the setting is unclear or transitioning, use "neutral"
+3. Set intensity based on how prominent the environment is described (0.3-0.8)
+4. Lower intensity (0.3-0.4) for indoor/quiet scenes
+5. Higher intensity (0.6-0.8) for dramatic outdoor/active scenes
+
+OUTPUT FORMAT - Return ONLY a JSON object:
+{"setting": "forest", "intensity": 0.5, "description": "Characters walking through dense woods"}
+
+If no clear setting, return: {"setting": "neutral", "intensity": 0.3, "description": "No specific environment"}`, text, strings.Join(settingsList, ", "))
+
+	reqBody := map[string]interface{}{
+		"model": "gpt-4o",
+		"messages": []map[string]string{
+			{"role": "system", "content": "Scene setting detection assistant for audio production."},
+			{"role": "user", "content": prompt},
+		},
+		"temperature": 0.5,
+		"max_tokens":  150,
+	}
+	bb, _ := json.Marshal(reqBody)
+	req, _ := http.NewRequest("POST", openAIChatURL, bytes.NewReader(bb))
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("⚠️ [Ambient] GPT error: %v, using neutral", err)
+		return &AmbientSetting{Setting: "neutral", Intensity: 0.3, Description: "Default"}, nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		log.Printf("⚠️ [Ambient] GPT returned %d: %s, using neutral", resp.StatusCode, b)
+		return &AmbientSetting{Setting: "neutral", Intensity: 0.3, Description: "Default"}, nil
+	}
+
+	var cr struct {
+		Choices []struct{ Message struct{ Content string } } `json:"choices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil || len(cr.Choices) == 0 {
+		return &AmbientSetting{Setting: "neutral", Intensity: 0.3, Description: "Default"}, nil
+	}
+
+	rawC := strings.TrimSpace(cr.Choices[0].Message.Content)
+	rawC = strings.TrimPrefix(rawC, "```json")
+	rawC = strings.Trim(rawC, "`")
+	rawC = strings.TrimSpace(rawC)
+
+	log.Printf("🌲 [Ambient Detection] GPT response: %s", rawC)
+
+	var setting AmbientSetting
+	if err := json.Unmarshal([]byte(rawC), &setting); err != nil {
+		log.Printf("⚠️ [Ambient] Failed to parse: %v, using neutral", err)
+		return &AmbientSetting{Setting: "neutral", Intensity: 0.3, Description: "Default"}, nil
+	}
+
+	// Validate setting exists
+	if _, ok := ambientPrompts[setting.Setting]; !ok {
+		log.Printf("⚠️ [Ambient] Unknown setting '%s', using neutral", setting.Setting)
+		setting.Setting = "neutral"
+	}
+
+	// Clamp intensity
+	if setting.Intensity < 0.1 {
+		setting.Intensity = 0.1
+	}
+	if setting.Intensity > 0.8 {
+		setting.Intensity = 0.8
+	}
+
+	log.Printf("🌲 [Ambient] Detected: %s (intensity: %.2f) - %s", setting.Setting, setting.Intensity, setting.Description)
+	return &setting, nil
+}
+
+// generateAmbientSoundscape generates a loopable ambient background
+func generateAmbientSoundscape(setting *AmbientSetting, bookID uint) (string, error) {
+	apiKey := os.Getenv("XI_API_KEY")
+	if apiKey == "" {
+		return "", errors.New("XI_API_KEY not set")
+	}
+
+	prompt, ok := ambientPrompts[setting.Setting]
+	if !ok {
+		prompt = ambientPrompts["neutral"]
+	}
+
+	// Use 15 second duration for loopable ambient (will be looped later)
+	payload := SoundEffectRequest{
+		Text:            prompt,
+		DurationSeconds: 15,
+		PromptInfluence: 0.6, // Moderate influence for natural ambient
+	}
+	body, _ := json.Marshal(payload)
+
+	log.Printf("🌲 [Ambient] Generating %s soundscape: %s", setting.Setting, truncateForLog(prompt, 80))
+
+	req, _ := http.NewRequest("POST", elevenLabsSoundEffectsURL, bytes.NewReader(body))
+	req.Header.Set("xi-api-key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 45 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ambient API error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("ambient API returned %d: %s", resp.StatusCode, b)
+	}
+
+	data, _ := io.ReadAll(resp.Body)
+	os.MkdirAll("./audio", 0755)
+	outPath := fmt.Sprintf("./audio/ambient_%s_%d.mp3", setting.Setting, bookID)
+	if err := os.WriteFile(outPath, data, 0644); err != nil {
+		return "", fmt.Errorf("write ambient file: %w", err)
+	}
+
+	log.Printf("✅ [Ambient] Generated: %s", outPath)
+	return outPath, nil
+}
+
+// loopAmbientToLength loops the ambient clip to match TTS duration with fade in/out
+func loopAmbientToLength(ambientPath string, ttsDur float64, intensity float64, bookID uint, pageIndex int) (string, error) {
+	// Volume based on intensity (very low: 0.08-0.18)
+	volume := 0.08 + (intensity * 0.10) // Maps 0.0-1.0 to 0.08-0.18
+
+	outPath := fmt.Sprintf("./audio/ambient_looped_%d_page_%d.ogg", bookID, pageIndex)
+
+	// Loop ambient, apply volume, add 1s fade in and 2s fade out
+	filterComplex := fmt.Sprintf(
+		"volume=%.2f,afade=t=in:st=0:d=1,afade=t=out:st=%.2f:d=2",
+		volume, ttsDur-2,
+	)
+
+	cmd := exec.Command("ffmpeg", "-y",
+		"-stream_loop", "-1", "-i", ambientPath,
+		"-t", fmt.Sprintf("%.2f", ttsDur),
+		"-af", filterComplex,
+		"-c:a", "libopus", "-b:a", "48k",
+		outPath,
+	)
+
+	if o, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("loop ambient fail: %v\n%s", err, o)
+	}
+
+	log.Printf("✅ [Ambient] Looped to %.2fs with volume %.2f: %s", ttsDur, volume, outPath)
+	return outPath, nil
+}
+
+// -------------------- FOLEY SYSTEM --------------------
 
 // validFoleyEvents lists all supported Foley sound effect types
 var validFoleyEvents = map[string]bool{
@@ -655,51 +998,89 @@ func processSoundEffectsAndMerge(book Book, hash string, pageIndexes []int) {
 	}
 }
 
-// overlaySoundEvents updated to accept book
+// overlaySoundEvents adds Foley sound effects with proper volume balance and fade in/out
+// Volume reduced from 0.45 to 0.30, with 0.05s fade in and 0.1s fade out for smoother blending
 func overlaySoundEvents(baseMix string, events EventMap, book Book, pageIndex int) (string, error) {
 	safeTitle := strings.ReplaceAll(strings.ToLower(book.Title), " ", "_")
 	hashSuffix := book.ContentHash[:8]
 	outFile := fmt.Sprintf("./audio/final_with_fx_%s_%d_page_%d_%s.ogg", safeTitle, book.ID, pageIndex, hashSuffix)
 
+	// If no events, just return the base mix
+	if len(events) == 0 {
+		log.Printf("🔊 [Foley] No sound events to overlay for page %d", pageIndex)
+		return baseMix, nil
+	}
+
 	args := []string{"-y", "-i", baseMix}
 	var filters, labels []string
 	inputIdx := 1
+	totalEffects := 0
 
 	for evt, times := range events {
 		clip, err := getOrGenerateEffect(evt)
 		if err != nil {
-			log.Printf("warning: %s clip error: %v", evt, err)
+			log.Printf("⚠️ [Foley] %s clip error: %v", evt, err)
 			continue
 		}
 		args = append(args, "-i", clip)
 		for j, t := range times {
-			d := int(t * 1000)
+			delayMs := int(t * 1000)
 			inLbl := fmt.Sprintf("[%d:a]", inputIdx)
 			outLbl := fmt.Sprintf("[e%d_%d]", inputIdx, j)
-			filters = append(filters, fmt.Sprintf("%sadelay=%d|%d,volume=0.45%s", inLbl, d, d, outLbl))
+			// Reduced volume (0.30), added fade in (0.05s) and fade out (0.1s) for smoother blending
+			// afade:t=in:d=0.05 - quick fade in to avoid click
+			// afade:t=out:st=0:d=0.1 - gentle fade out (starts at end of effect)
+			filters = append(filters, fmt.Sprintf(
+				"%safade=t=in:d=0.05,afade=t=out:st=0:d=0.1,adelay=%d|%d,volume=0.30%s",
+				inLbl, delayMs, delayMs, outLbl,
+			))
 			labels = append(labels, outLbl)
+			totalEffects++
+			log.Printf("🔊 [Foley] Adding %s at %.2fs (volume: 30%%)", evt, t)
 		}
 		inputIdx++
 	}
+
+	if len(labels) == 0 {
+		log.Printf("🔊 [Foley] No valid effects generated for page %d", pageIndex)
+		return baseMix, nil
+	}
+
 	amixIn := "[0:a]" + strings.Join(labels, "")
 	totalIn := 1 + len(labels)
 	filters = append(filters, fmt.Sprintf("%samix=inputs=%d:duration=first:dropout_transition=0", amixIn, totalIn))
 
 	args = append(args, "-filter_complex", strings.Join(filters, ";"), "-c:a", "libopus", "-b:a", "64k", outFile)
 
+	log.Printf("🔊 [Foley] Overlaying %d effects onto page %d", totalEffects, pageIndex)
+
 	if o, err := exec.Command("ffmpeg", args...).CombinedOutput(); err != nil {
 		return "", fmt.Errorf("overlaySoundEvents FFmpeg fail: %v\n%s", err, o)
 	}
+
+	log.Printf("✅ [Foley] Completed overlay: %s", outFile)
 	return outFile, nil
 }
 
-// cleanupTempFiles removes dynamic segments and lists
+// cleanupTempFiles removes all temporary audio processing files
 func cleanupTempFiles(_ uint) {
-	pattern := "dyn_seg_*.ogg"
-	matches, _ := filepath.Glob(pattern)
-	for _, file := range matches {
-		os.Remove(file)
+	// Clean up dynamic segment files
+	patterns := []string{
+		"dyn_seg_*.ogg",
+		"dyn_crossfade_*.ogg",
+		"./audio/ambient_looped_*.ogg",
 	}
+
+	for _, pattern := range patterns {
+		matches, _ := filepath.Glob(pattern)
+		for _, file := range matches {
+			if err := os.Remove(file); err == nil {
+				log.Printf("🧹 [Cleanup] Removed temp file: %s", file)
+			}
+		}
+	}
+
+	// Remove temp list file
 	os.Remove("dyn_list.txt")
 }
 
