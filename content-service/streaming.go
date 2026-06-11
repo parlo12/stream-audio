@@ -18,8 +18,6 @@ func proxyBookAudioHandler(c *gin.Context) {
 		return
 	}
 
-	fmt.Println("🎫 Token received:", tokenString)
-
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		return jwtSecretKey, nil
 	})

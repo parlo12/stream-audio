@@ -9,7 +9,8 @@ services:
       POSTGRES_USER: ${DB_USER:-rolf}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-your_password}
       POSTGRES_DB: ${DB_NAME:-streaming_db}
-    ports: ["5433:5432"]  # Changed external port to 5433 to avoid conflicts
+    # SECURITY: bound to localhost only — never expose the DB to the internet
+    ports: ["127.0.0.1:5433:5432"]
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -21,7 +22,8 @@ services:
   redis:
     image: redis:7-alpine
     restart: always
-    ports: ["6380:6379"]  # Changed external port to 6380 to avoid conflicts
+    # SECURITY: bound to localhost only — services reach Redis via the docker network
+    ports: ["127.0.0.1:6380:6379"]
     volumes:
       - redis_data:/data
       - ./logs/redis:/var/log/redis
@@ -47,9 +49,13 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
-    ports: ["8082:8082"]
+    # SECURITY: bound to localhost only — nginx proxies narrafied.com → localhost:8082
+    ports: ["127.0.0.1:8082:8082"]
     volumes:
       - ./logs/auth:/app/logs
+      - content-audio-persistent:/app/audio  # Mount audio files (admin file mgmt)
+      - content-covers-persistent:/app/covers  # Mount cover images (admin file mgmt)
+      - /opt/stream-audio-data/uploads:/app/uploads  # Mount uploads directory
     logging:
       driver: "json-file"
       options:
@@ -81,7 +87,8 @@ services:
         condition: service_started
       auth-service:
         condition: service_started
-    ports: ["8083:8083"]
+    # SECURITY: bound to localhost only — nginx proxies narrafied.com → localhost:8083
+    ports: ["127.0.0.1:8083:8083"]
     volumes:
       - content-audio-persistent:/app/audio  # Enhanced persistent storage
       - content-covers-persistent:/app/uploads/covers  # Enhanced persistent storage

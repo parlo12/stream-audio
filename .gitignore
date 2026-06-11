@@ -8,3 +8,7 @@
 *.backup
 logs/
 .DS_Store
+# compiled binaries
+auth-service/auth-service
+gateway/gateway.git
+content-service/content-service

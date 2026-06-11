@@ -29,8 +29,18 @@ import (
 )
 
 // Global variables
-var jwtSecretKey = []byte(getEnv("JWT_SECRET", "your_secret_key"))
+var jwtSecretKey = []byte(mustEnv("JWT_SECRET"))
 var db *gorm.DB
+
+// mustEnv returns the env var value or exits — services must never run
+// with a default/guessable secret.
+func mustEnv(key string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		log.Fatalf("FATAL: required environment variable %s is not set", key)
+	}
+	return v
+}
 
 // User defines the schema for the "users" table.
 type User struct {
@@ -347,15 +357,12 @@ func setupDatabase() {
 	dbPort := getEnv("DB_PORT", "5432")
 	sslMode := getEnv("DB_SSLMODE", "") // “disable” for local, override to “require” in prod
 
-	// Build the DSN string
-	// I got a security flaw here this needs to be mask
-	// mask := string.ReplaceAll(dsn, dbPassword, "********")
 	dsn := fmt.Sprintf(
 		"host=%s user=%s password=%s dbname=%s port=%s sslmode=%s TimeZone=UTC",
 		dbHost, dbUser, dbPassword, dbName, dbPort, sslMode,
 	)
 
-	log.Printf("🔍 DSN=%q\n", dsn)
+	log.Printf("🔍 Connecting to database host=%s dbname=%s sslmode=%s", dbHost, dbName, sslMode)
 
 	var err error
 	// Open the connection
@@ -742,6 +749,12 @@ func authMiddleware() gin.HandlerFunc {
 		}
 		// Save claims in context for later handlers to use
 		c.Set("claims", token.Claims)
+		// Also set user_id directly — handlers like deactivate/delete depend on it
+		if claims, ok := token.Claims.(jwt.MapClaims); ok {
+			if userIDFloat, ok := claims["user_id"].(float64); ok {
+				c.Set("user_id", uint(userIDFloat))
+			}
+		}
 		c.Next()
 	}
 }
@@ -1143,7 +1156,20 @@ func deleteAccountHandler(c *gin.Context) {
 
 // restoreAccountHandler restores a previously deleted/deactivated account
 // POST /restore-account (public endpoint)
+//
+// SECURITY: disabled pending redesign. As implemented, this endpoint issued a
+// logged-in JWT to anyone who knew a deleted account's email address — an
+// account-takeover hole. Re-enable only with proof of identity (password from
+// the stored history record, or a verified social token matching the stored
+// provider ID). See appFixPlan.md Phase 2.
 func restoreAccountHandler(c *gin.Context) {
+	c.JSON(http.StatusGone, gin.H{
+		"error":   "Account restoration is temporarily unavailable",
+		"message": "This feature is undergoing maintenance. Please contact support to restore your account.",
+	})
+}
+
+func restoreAccountHandlerDisabled(c *gin.Context) {
 	var req RestoreAccountRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request", "details": err.Error()})

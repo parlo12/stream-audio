@@ -24,7 +24,17 @@ import (
 var db *gorm.DB
 
 // Use the JWT secret from an environment variable.
-var jwtSecretKey = []byte(getEnv("JWT_SECRET", "defaultSecrete"))
+var jwtSecretKey = []byte(mustEnv("JWT_SECRET"))
+
+// mustEnv returns the env var value or exits — services must never run
+// with a default/guessable secret.
+func mustEnv(key string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		log.Fatalf("FATAL: required environment variable %s is not set", key)
+	}
+	return v
+}
 
 // Allowed categories for validation
 var allowedCategories = []string{"Fiction", "Non-Fiction"}
@@ -124,10 +134,12 @@ func main() {
 		c.JSON(200, gin.H{"ok": true})
 	})
 
-	// ✅ Serve static audio files from ./audio
-	router.Static("/audio", "./audio")
+	// SECURITY: do NOT serve ./audio statically — it exposed every user's
+	// generated audiobook publicly with no auth. All audio is streamed through
+	// the authenticated /user/... endpoints instead.
 
-	// static cover files
+	// Static cover files: intentionally public (book covers are not paid
+	// content, and the iOS app loads cover_url without an auth header).
 	router.Static("/covers", "./uploads/covers")
 
 	// Calling Streaming Route outside of the authorized group
@@ -226,8 +238,6 @@ func setupDatabase() {
 	dbName := getEnv("DB_NAME", "")
 	dbPort := getEnv("DB_PORT", "")
 	sslMode := getEnv("DB_SSLMODE", "disable") // “disable” for local, override to “require” in prod
-	// Build the DSN string
-	// security flow here using function to mask db password ReplaceAll(dsn, dbPassword, "********")
 	dsn := fmt.Sprintf(
 		"host=%s user=%s password=%s dbname=%s port=%s sslmode=%s TimeZone=UTC",
 		dbHost, dbUser, dbPassword, dbName, dbPort, sslMode,
@@ -239,7 +249,7 @@ func setupDatabase() {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 
-	log.Println("DNS", dsn)
+	log.Printf("Connected to database host=%s dbname=%s sslmode=%s", dbHost, dbName, sslMode)
 
 	if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}, &PlaybackProgress{}); err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)

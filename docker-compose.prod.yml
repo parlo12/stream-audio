@@ -6,7 +6,8 @@ services:
   redis:
     image: redis:7-alpine
     restart: always
-    ports: ["6379:6379"]
+    # SECURITY: bound to localhost only — services reach Redis via the docker network
+    ports: ["127.0.0.1:6379:6379"]
     volumes:
       - redis_data:/data
       - ./logs/redis:/var/log/redis
@@ -45,7 +46,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-    ports: ["8082:8082"]
+    # SECURITY: bound to localhost only — nginx proxies narrafied.com → localhost:8082
+    ports: ["127.0.0.1:8082:8082"]
     volumes:
       - content-audio:/app/audio
       - content-covers:/app/uploads/covers
@@ -92,9 +94,10 @@ services:
         condition: service_healthy
       auth-service:
         condition: service_started
-    ports: 
-      - "8083:8083"
-      - "8084:8084"
+    # SECURITY: bound to localhost only — nginx proxies narrafied.com → localhost:8083
+    # (8084 mapping removed: nothing listens on it)
+    ports:
+      - "127.0.0.1:8083:8083"
     volumes:
       - content-audio-persistent:/app/audio
       - content-covers-persistent:/app/uploads/covers
