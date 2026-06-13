@@ -1,18 +1,22 @@
 package main
 
 import (
+	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
+	"math/big"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -253,9 +257,25 @@ type FileTreeNode struct {
 	Children []*FileTreeNode `json:"children,omitempty"`
 }
 
+// validateSocialLoginConfig warns when a social provider is missing the
+// configuration required to verify its tokens. Verification itself fails
+// closed at request time (see verifyGoogleToken / verifyFacebookAppBinding),
+// so a missing var disables that provider rather than weakening security.
+func validateSocialLoginConfig() {
+	if getEnv("GOOGLE_CLIENT_ID", "") == "" {
+		log.Println("⚠️  GOOGLE_CLIENT_ID is not set — Google Sign-In will reject all tokens.")
+	}
+	if getEnv("FACEBOOK_APP_ID", "") == "" || getEnv("FACEBOOK_APP_SECRET", "") == "" {
+		log.Println("⚠️  FACEBOOK_APP_ID / FACEBOOK_APP_SECRET not set — Facebook Login will reject all tokens.")
+	}
+}
+
 func main() {
 	// Initialize the database connection and run migrations
 	setupDatabase()
+
+	// Surface any missing social-login configuration up front.
+	validateSocialLoginConfig()
 
 	// Set Gin mode based on environment variable; default to release
 	ginMode := os.Getenv("GIN_MODE")
@@ -397,18 +417,20 @@ func signupHandler(c *gin.Context) {
 		return
 	}
 
-	// Check if there's a deleted/deactivated account that can be restored
+	// Check if there's a deleted/deactivated account that can be restored.
+	// Each .Or branch is a grouped sub-query so "restored_at IS NULL" binds to
+	// every condition — otherwise already-restored or *other people's* history
+	// rows would match (B3).
 	var history UserHistory
 	canRestore := false
 	if req.Email != "" {
-		// Try to find matching history by email, phone, or device ID
 		query := db.Where("email = ?", req.Email).Where("restored_at IS NULL")
 
 		if req.PhoneNumber != "" {
-			query = query.Or("phone_number = ?", req.PhoneNumber)
+			query = query.Or(db.Where("phone_number = ?", req.PhoneNumber).Where("restored_at IS NULL"))
 		}
 		if req.DeviceID != "" {
-			query = query.Or("device_id = ?", req.DeviceID)
+			query = query.Or(db.Where("device_id = ?", req.DeviceID).Where("restored_at IS NULL"))
 		}
 
 		if err := query.Order("deleted_at DESC").First(&history).Error; err == nil {
@@ -417,15 +439,14 @@ func signupHandler(c *gin.Context) {
 		}
 	}
 
-	// If account can be restored, suggest restoration
+	// If account can be restored, suggest restoration. Do NOT leak the matched
+	// account's username/history_id/deleted_at to an unauthenticated caller —
+	// proof of identity happens in the (separate) restore flow.
 	if canRestore {
 		c.JSON(http.StatusConflict, gin.H{
-			"error": "Account previously existed",
+			"error":       "Account previously existed",
 			"can_restore": true,
-			"message": "We found a previous account associated with this information. Would you like to restore it?",
-			"history_id": history.ID,
-			"deleted_at": history.DeletedAt,
-			"original_username": history.Username,
+			"message":     "We found a previous account associated with this information. Would you like to restore it?",
 		})
 		return
 	}
@@ -2092,14 +2113,22 @@ func appleSignInHandler(c *gin.Context) {
 	appleUserID := claims.SUB
 	email := claims.Email
 
-	// If email not in token, use the one from request (first sign-in only)
+	// Email is only trustworthy when it came verified inside the token.
+	emailVerified := claims.Email != "" && claims.EmailVerified == "true"
+
+	// If email not in token, use the one from request (first sign-in only).
+	// A request-supplied email is unverified and must not auto-link.
 	if email == "" && req.Email != "" {
 		email = req.Email
 	}
 
 	// Handle social login (find or create user)
-	user, isNewUser, err := handleSocialLogin("apple", appleUserID, email, req.FullName.GivenName, req.FullName.FamilyName, "")
+	user, isNewUser, err := handleSocialLogin("apple", appleUserID, email, req.FullName.GivenName, req.FullName.FamilyName, "", emailVerified)
 	if err != nil {
+		if errors.Is(err, ErrLinkRequiresVerification) {
+			c.JSON(http.StatusConflict, gin.H{"error": "link_requires_verification", "message": err.Error()})
+			return
+		}
 		log.Printf("❌ Apple sign-in failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "message": err.Error()})
 		return
@@ -2145,8 +2174,13 @@ func googleSignInHandler(c *gin.Context) {
 	}
 
 	// Handle social login (find or create user)
-	user, isNewUser, err := handleSocialLogin("google", tokenInfo.SUB, tokenInfo.Email, tokenInfo.GivenName, tokenInfo.FamilyName, tokenInfo.Picture)
+	emailVerified := tokenInfo.EmailVerified == "true"
+	user, isNewUser, err := handleSocialLogin("google", tokenInfo.SUB, tokenInfo.Email, tokenInfo.GivenName, tokenInfo.FamilyName, tokenInfo.Picture, emailVerified)
 	if err != nil {
+		if errors.Is(err, ErrLinkRequiresVerification) {
+			c.JSON(http.StatusConflict, gin.H{"error": "link_requires_verification", "message": err.Error()})
+			return
+		}
 		log.Printf("❌ Google sign-in failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "message": err.Error()})
 		return
@@ -2199,9 +2233,14 @@ func facebookLoginHandler(c *gin.Context) {
 		lastName = nameParts[1]
 	}
 
-	// Handle social login (find or create user)
-	user, isNewUser, err := handleSocialLogin("facebook", fbUser.ID, fbUser.Email, firstName, lastName, fbUser.Picture.Data.URL)
+	// Handle social login (find or create user). Facebook's Graph API does not
+	// expose an email-verified flag, so we never auto-link by email.
+	user, isNewUser, err := handleSocialLogin("facebook", fbUser.ID, fbUser.Email, firstName, lastName, fbUser.Picture.Data.URL, false)
 	if err != nil {
+		if errors.Is(err, ErrLinkRequiresVerification) {
+			c.JSON(http.StatusConflict, gin.H{"error": "link_requires_verification", "message": err.Error()})
+			return
+		}
 		log.Printf("❌ Facebook login failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "message": err.Error()})
 		return
@@ -2233,17 +2272,136 @@ func facebookLoginHandler(c *gin.Context) {
 // SOCIAL LOGIN HELPER FUNCTIONS
 // ============================================================================
 
-// verifyAppleToken verifies an Apple identity token
-func verifyAppleToken(identityToken string) (*AppleTokenClaims, error) {
-	// Parse the token without verification first to get the header
-	token, _, err := new(jwt.Parser).ParseUnverified(identityToken, &AppleTokenClaims{})
+// appleKeysURL is Apple's published JWKS endpoint for Sign in with Apple.
+const appleKeysURL = "https://appleid.apple.com/auth/keys"
+
+// appleJWK is a single RSA key from Apple's JWKS.
+type appleJWK struct {
+	Kty string `json:"kty"`
+	Kid string `json:"kid"`
+	Use string `json:"use"`
+	Alg string `json:"alg"`
+	N   string `json:"n"`
+	E   string `json:"e"`
+}
+
+// appleKeyCache caches Apple's public keys (parsed to *rsa.PublicKey by kid)
+// with a TTL. Apple rotates these keys, so we refetch on miss or expiry.
+var appleKeyCache = struct {
+	sync.RWMutex
+	keys      map[string]*rsa.PublicKey
+	fetchedAt time.Time
+}{keys: map[string]*rsa.PublicKey{}}
+
+const appleKeyCacheTTL = time.Hour
+
+// fetchAppleKeys downloads Apple's JWKS and replaces the cache.
+func fetchAppleKeys() error {
+	resp, err := http.Get(appleKeysURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse token: %v", err)
+		return fmt.Errorf("fetch Apple keys: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("fetch Apple keys: status %d", resp.StatusCode)
 	}
 
-	claims, ok := token.Claims.(*AppleTokenClaims)
+	var set struct {
+		Keys []appleJWK `json:"keys"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&set); err != nil {
+		return fmt.Errorf("decode Apple keys: %v", err)
+	}
+
+	parsed := make(map[string]*rsa.PublicKey, len(set.Keys))
+	for _, k := range set.Keys {
+		if k.Kty != "RSA" {
+			continue
+		}
+		pub, err := jwkToRSAPublicKey(k)
+		if err != nil {
+			log.Printf("⚠️  skipping Apple key %s: %v", k.Kid, err)
+			continue
+		}
+		parsed[k.Kid] = pub
+	}
+	if len(parsed) == 0 {
+		return errors.New("no usable RSA keys in Apple JWKS")
+	}
+
+	appleKeyCache.Lock()
+	appleKeyCache.keys = parsed
+	appleKeyCache.fetchedAt = time.Now()
+	appleKeyCache.Unlock()
+	return nil
+}
+
+// jwkToRSAPublicKey converts a JWK's base64url modulus/exponent to an RSA key.
+func jwkToRSAPublicKey(k appleJWK) (*rsa.PublicKey, error) {
+	nBytes, err := base64.RawURLEncoding.DecodeString(k.N)
+	if err != nil {
+		return nil, fmt.Errorf("decode modulus: %v", err)
+	}
+	eBytes, err := base64.RawURLEncoding.DecodeString(k.E)
+	if err != nil {
+		return nil, fmt.Errorf("decode exponent: %v", err)
+	}
+	return &rsa.PublicKey{
+		N: new(big.Int).SetBytes(nBytes),
+		E: int(new(big.Int).SetBytes(eBytes).Int64()),
+	}, nil
+}
+
+// appleKeyByKid returns the cached RSA public key for kid, refetching the JWKS
+// when the cache is stale or the kid is unknown (key rotation).
+func appleKeyByKid(kid string) (*rsa.PublicKey, error) {
+	appleKeyCache.RLock()
+	key, ok := appleKeyCache.keys[kid]
+	stale := time.Since(appleKeyCache.fetchedAt) > appleKeyCacheTTL
+	appleKeyCache.RUnlock()
+
+	if ok && !stale {
+		return key, nil
+	}
+
+	if err := fetchAppleKeys(); err != nil {
+		// Fall back to a stale-but-present key rather than failing a login
+		// during a transient Apple outage.
+		if ok {
+			return key, nil
+		}
+		return nil, err
+	}
+
+	appleKeyCache.RLock()
+	key, ok = appleKeyCache.keys[kid]
+	appleKeyCache.RUnlock()
 	if !ok {
-		return nil, errors.New("invalid token claims")
+		return nil, fmt.Errorf("unknown Apple key id: %s", kid)
+	}
+	return key, nil
+}
+
+// verifyAppleToken cryptographically verifies an Apple identity token: it
+// checks the RS256 signature against Apple's published JWKS (rejecting any
+// other signing method to block alg-confusion), then validates iss/aud/exp.
+func verifyAppleToken(identityToken string) (*AppleTokenClaims, error) {
+	claims := &AppleTokenClaims{}
+	token, err := jwt.ParseWithClaims(identityToken, claims, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		kid, _ := token.Header["kid"].(string)
+		if kid == "" {
+			return nil, errors.New("token missing key id (kid)")
+		}
+		return appleKeyByKid(kid)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("signature verification failed: %v", err)
+	}
+	if !token.Valid {
+		return nil, errors.New("invalid token")
 	}
 
 	// Verify issuer
@@ -2257,14 +2415,11 @@ func verifyAppleToken(identityToken string) (*AppleTokenClaims, error) {
 		return nil, fmt.Errorf("invalid audience: expected %s, got %s", expectedAudience, claims.AUD)
 	}
 
-	// Verify expiration
+	// Verify expiration (AppleTokenClaims.EXP shadows the embedded
+	// StandardClaims.ExpiresAt, so check it explicitly).
 	if time.Now().Unix() > claims.EXP {
 		return nil, errors.New("token expired")
 	}
-
-	// For production, you should fetch Apple's public keys and verify the signature
-	// Apple public keys: https://appleid.apple.com/auth/keys
-	// For now, we're doing basic validation - add full signature verification for production
 
 	log.Printf("🍎 Apple token verified for user: %s, email: %s", claims.SUB, claims.Email)
 	return claims, nil
@@ -2291,9 +2446,19 @@ func verifyGoogleToken(idToken string) (*GoogleTokenInfo, error) {
 		return nil, fmt.Errorf("failed to decode response: %v", err)
 	}
 
-	// Verify audience (should be your Google Client ID)
+	// Verify issuer.
+	if tokenInfo.ISS != "accounts.google.com" && tokenInfo.ISS != "https://accounts.google.com" {
+		return nil, fmt.Errorf("invalid issuer: %s", tokenInfo.ISS)
+	}
+
+	// Verify audience against our Google Client ID. GOOGLE_CLIENT_ID is
+	// mandatory (enforced at startup): without it, tokens minted for *any*
+	// app would be accepted. Fail closed.
 	expectedClientID := getEnv("GOOGLE_CLIENT_ID", "")
-	if expectedClientID != "" && tokenInfo.AUD != expectedClientID {
+	if expectedClientID == "" {
+		return nil, errors.New("GOOGLE_CLIENT_ID is not configured")
+	}
+	if tokenInfo.AUD != expectedClientID {
 		return nil, fmt.Errorf("invalid audience: expected %s, got %s", expectedClientID, tokenInfo.AUD)
 	}
 
@@ -2327,12 +2492,74 @@ func verifyFacebookToken(accessToken, userID string) (*FacebookUserInfo, error) 
 		return nil, fmt.Errorf("user ID mismatch: expected %s, got %s", userID, fbUser.ID)
 	}
 
+	// Confirm the token was actually issued for *our* app. Without this, a
+	// user access token minted for any other Facebook app would log in here.
+	if err := verifyFacebookAppBinding(accessToken); err != nil {
+		return nil, err
+	}
+
 	log.Printf("📘 Facebook token verified for user: %s, email: %s", fbUser.ID, fbUser.Email)
 	return &fbUser, nil
 }
 
-// handleSocialLogin finds or creates a user for social login
-func handleSocialLogin(provider, providerUserID, email, firstName, lastName, profilePicture string) (*User, bool, error) {
+// FacebookDebugTokenResponse models Facebook's /debug_token response.
+type FacebookDebugTokenResponse struct {
+	Data struct {
+		AppID   string `json:"app_id"`
+		IsValid bool   `json:"is_valid"`
+		UserID  string `json:"user_id"`
+	} `json:"data"`
+}
+
+// verifyFacebookAppBinding calls Facebook's debug_token endpoint with our app
+// access token and requires the inspected token to be valid and bound to our
+// FACEBOOK_APP_ID. FACEBOOK_APP_ID / FACEBOOK_APP_SECRET are mandatory.
+func verifyFacebookAppBinding(accessToken string) error {
+	appID := getEnv("FACEBOOK_APP_ID", "")
+	appSecret := getEnv("FACEBOOK_APP_SECRET", "")
+	if appID == "" || appSecret == "" {
+		return errors.New("FACEBOOK_APP_ID / FACEBOOK_APP_SECRET are not configured")
+	}
+
+	// App access token form: "<app-id>|<app-secret>" (no extra round-trip).
+	appAccessToken := fmt.Sprintf("%s|%s", appID, appSecret)
+	url := fmt.Sprintf("https://graph.facebook.com/debug_token?input_token=%s&access_token=%s",
+		accessToken, appAccessToken)
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("debug_token request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return fmt.Errorf("debug_token failed: %s", string(body))
+	}
+
+	var debug FacebookDebugTokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&debug); err != nil {
+		return fmt.Errorf("failed to decode debug_token response: %v", err)
+	}
+	if !debug.Data.IsValid {
+		return errors.New("Facebook token is not valid")
+	}
+	if debug.Data.AppID != appID {
+		return fmt.Errorf("Facebook token issued for app %s, not %s", debug.Data.AppID, appID)
+	}
+	return nil
+}
+
+// ErrLinkRequiresVerification is returned when a social identity's email
+// matches an existing account but the provider did not assert that the email
+// is verified. Auto-linking in that case would allow account takeover via a
+// spoofed/unverified email, so the caller must require password confirmation
+// instead of issuing a token.
+var ErrLinkRequiresVerification = errors.New("email matches an existing account; sign in with your password to link this provider")
+
+// handleSocialLogin finds or creates a user for social login. emailVerified
+// must reflect whether the provider cryptographically asserted that this email
+// belongs to the user; it gates auto-linking to a pre-existing email account.
+func handleSocialLogin(provider, providerUserID, email, firstName, lastName, profilePicture string, emailVerified bool) (*User, bool, error) {
 	var user User
 	var isNewUser bool
 
@@ -2364,6 +2591,11 @@ func handleSocialLogin(provider, providerUserID, email, firstName, lastName, pro
 	if email != "" {
 		err = db.Where("email = ?", email).First(&user).Error
 		if err == nil {
+			// Only auto-link when the provider asserted the email is verified.
+			// Otherwise a spoofed/unverified email could take over the account.
+			if !emailVerified {
+				return nil, false, ErrLinkRequiresVerification
+			}
 			// User found by email - link social account
 			switch provider {
 			case "apple":

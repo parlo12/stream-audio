@@ -85,13 +85,13 @@ Do these in one sitting; none requires architectural thought:
 6. **Disable `/restore-account`** (S5) until Phase 2 redesigns it (return 410 or feature-flag it off). Restoration via the signup-conflict path can wait; an account-takeover hole cannot.
 7. **Commit + push**: backend `sound_effects.go` work, then create a private remote for the iOS repo and push everything (its first off-machine backup).
 
-### Phase 1 — Authentication is actually authentication (1–2 days)
+### Phase 1 — Authentication is actually authentication (1–2 days) ✅ DONE (June 12, 2026)
 
-8. **Verify Apple tokens properly** (S3): fetch Apple's JWKS (`appleid.apple.com/auth/keys`), verify signature + iss + aud + exp (use a maintained library, e.g. an apple-signin Go package, or jwx with key caching).
-9. **Harden Google/Facebook** (S4): make `GOOGLE_CLIENT_ID` mandatory (refuse to start without it, like JWT_SECRET); Facebook: call `debug_token` with the app token and require `is_valid && app_id == FACEBOOK_APP_ID`.
-10. **Rework account linking**: only auto-link a social identity to an existing email account when the provider asserts the email is verified; otherwise require password confirmation. Prevents linking-based takeover even if a provider check regresses.
-11. **Fix B3**: correct the grouped OR query (`email = ? AND restored_at IS NULL` OR `(phone … AND restored_at IS NULL)`), and stop returning the matched account's username/history details to an unauthenticated caller.
-12. **Pin signing method** in content-service's JWT parse (S10), and extract **one shared auth package** (`internal/authn`: middleware, token issue/verify, claims helpers) used by both services — this is the structural fix that prevents the next B1.
+8. ~~**Verify Apple tokens properly** (S3)~~ ✅ — Hand-rolled stdlib JWKS verification: cached RSA keyset from `appleid.apple.com/auth/keys` (TTL 1h, refetch on kid miss), RS256-only keyfunc (rejects alg-confusion), then iss/aud/exp checks. Covered by `apple_verify_test.go` (valid / forged-sig / HMAC / wrong-aud / wrong-iss / expired).
+9. ~~**Harden Google/Facebook** (S4)~~ ✅ — Google: `GOOGLE_CLIENT_ID` now mandatory at request time (audience always enforced) + iss check. Facebook: `debug_token` with the `<id>|<secret>` app token, requires `is_valid && app_id == FACEBOOK_APP_ID`. Both fail closed; startup logs a warning per unconfigured provider (chose warn-not-crash so a missing optional secret can't take down email login / local dev).
+10. ~~**Rework account linking**~~ ✅ — `handleSocialLogin` takes `emailVerified`; auto-links to an existing email account only when the provider asserts the email is verified (Apple/Google `email_verified == "true"`; Facebook never), else returns `ErrLinkRequiresVerification` → HTTP 409, no JWT.
+11. ~~**Fix B3**~~ ✅ — Grouped `.Or(db.Where(...).Where("restored_at IS NULL"))` so the filter binds to every branch; signup conflict response no longer leaks `original_username`/`history_id`/`deleted_at`.
+12. ~~**Pin signing method** in content-service (S10)~~ ✅ — keyfunc now asserts `*jwt.SigningMethodHMAC`, matching auth-service. **Deferred:** the full shared `internal/authn` package extraction (separate Go modules, per-service Docker contexts) → Phase 5 packaging.
 
 ### Phase 2 — Ownership and account lifecycle (2–3 days)
 
@@ -145,7 +145,7 @@ With the above done, start [structureImprovmentPlan.md](structureImprovmentPlan.
 ## Part C — Suggested working order summary (one line each)
 
 1. ~~Ports/static/secrets/logging/user_id/restore-off/push repos~~ → **Phase 0, do today.**
-2. Social-login verification + shared auth package → **Phase 1.**
+2. ~~Social-login verification + signing-method pin~~ → **Phase 1 ✅** (shared-package extraction deferred to Phase 5).
 3. Ownership middleware + upload hardening + admin fixes → **Phase 2.**
 4. Temp dirs, locks, per-page context, Foley fade, caching, toggle, tests → **Phase 3.**
 5. Stripe line-items + webhook coverage + pricing reconciliation → **Phase 4.**

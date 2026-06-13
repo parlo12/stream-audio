@@ -542,8 +542,13 @@ func authMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Parse and validate token
+		// Parse and validate token. Pin the signing method to HMAC so a token
+		// presented with a different algorithm (e.g. alg=none, or RS256 using
+		// our secret as a public key) is rejected — matches auth-service.
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
 			return jwtSecretKey, nil
 		})
 		if err != nil || !token.Valid {
