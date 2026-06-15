@@ -795,9 +795,14 @@ func BatchTranscribeBookHandler(c *gin.Context) {
 				continue
 			}
 
+			// The batch path runs no separate Foley overlay, so the merged
+			// audio is the deliverable: set final_audio_path too, otherwise
+			// the /pages/:page/audio handler (which serves final_audio_path)
+			// 404s for batch-transcribed pages.
 			db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Updates(map[string]interface{}{
-				"audio_path": mergedAudio,
-				"tts_status": "completed",
+				"audio_path":       mergedAudio,
+				"final_audio_path": mergedAudio,
+				"tts_status":       "completed",
 			})
 		}
 
