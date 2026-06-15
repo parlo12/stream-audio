@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -12,6 +13,42 @@ import (
 
 	"github.com/hibiken/asynq"
 )
+
+// maybeResumeTranscription re-starts a book that was paused ahead of the
+// listener once they've advanced enough that the next pending batch is back
+// inside the pause-ahead window. Called from the playback-progress handler.
+func maybeResumeTranscription(accountType string, bookID uint, chunkIndex int) {
+	var b Book
+	if err := db.First(&b, bookID).Error; err != nil || b.Status != "paused_ahead" {
+		return
+	}
+	var res struct{ Min *int }
+	db.Model(&BookChunk{}).Select("MIN(\"index\") as min").
+		Where("book_id = ? AND tts_status <> ?", bookID, "completed").Scan(&res)
+	if res.Min == nil {
+		return // nothing left to transcribe
+	}
+	start := *res.Min
+	if start > chunkIndex+pauseAheadPages() {
+		return // listener still hasn't caught up to the window
+	}
+	db.Model(&Book{}).Where("id = ?", bookID).Update("status", "transcribing")
+	if err := enqueueTranscribeBatch(bookID, start, start+batchSizePages-1, b.UserID, accountType); err != nil {
+		log.Printf("⚠️ resume: enqueue batch for book %d failed: %v", bookID, err)
+	} else {
+		log.Printf("▶️ resumed transcription for book %d at page %d", bookID, start)
+	}
+}
+
+// listenerChunkIndex returns the user's current listening page index for a book
+// (0 if they haven't started) — used by the pause-ahead gate.
+func listenerChunkIndex(userID, bookID uint) int {
+	var pp PlaybackProgress
+	if err := db.Where("user_id = ? AND book_id = ?", userID, bookID).First(&pp).Error; err != nil {
+		return 0
+	}
+	return pp.ChunkIndex
+}
 
 // ---- task types & payloads ----
 
@@ -131,13 +168,22 @@ func enqueueFetchCover(bookID uint, title, author string) error {
 
 // transcribePage runs the full TTS→music→mix→R2 pipeline for one chunk and is
 // idempotent (atomic claim skips already-processing/completed chunks).
-func transcribePage(book Book, chunk BookChunk) error {
+func transcribePage(book Book, chunk BookChunk, userID uint, accountType string) error {
 	claim := db.Model(&BookChunk{}).
 		Where("id = ? AND tts_status NOT IN ?", chunk.ID, []string{"processing", "completed"}).
 		Update("tts_status", "processing")
 	if claim.RowsAffected == 0 {
-		return nil // already done or in-flight elsewhere
+		return nil // already done or in-flight elsewhere (don't double-consume quota)
 	}
+
+	// Consume one transcription page from the monthly budget (only on a fresh
+	// claim, so retries never double-count). On deny, release the claim and
+	// signal the batch to stop.
+	if d := checkAndConsume(userID, accountType, "transcribe_pages", 1, book.ID); !d.Allowed {
+		db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "pending")
+		return errQuotaExceeded
+	}
+
 	fail := func() { db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "failed") }
 
 	audioPath, err := convertTextToAudio(chunk.Content, chunk.ID)
@@ -207,19 +253,14 @@ func handleTranscribeBatch(ctx context.Context, t *asynq.Task) error {
 
 	capped := false
 	for _, ch := range chunks {
-		if p.AccountType == "free" {
-			var completed int64
-			db.Model(&BookChunk{}).
-				Joins("JOIN books ON books.id = book_chunks.book_id").
-				Where("book_chunks.tts_status = ? AND books.user_id = ?", "completed", p.UserID).
-				Count(&completed)
-			if completed >= freeTierPageLimit() {
-				log.Printf("🛑 Free-tier cap reached for user %d; stopping book %d", p.UserID, p.BookID)
+		// transcribePage consumes the per-page quota on a fresh claim; a quota
+		// denial stops the batch.
+		if err := transcribePage(book, ch, p.UserID, p.AccountType); err != nil {
+			if errors.Is(err, errQuotaExceeded) {
+				log.Printf("🛑 transcription quota reached for user %d; stopping book %d", p.UserID, p.BookID)
 				capped = true
 				break
 			}
-		}
-		if err := transcribePage(book, ch); err != nil {
 			log.Printf("⚠️ page %d (book %d) failed: %v", ch.Index, p.BookID, err)
 		}
 	}
@@ -230,11 +271,20 @@ func handleTranscribeBatch(ctx context.Context, t *asynq.Task) error {
 	db.Model(&BookChunk{}).Where("book_id = ? AND tts_status = ?", p.BookID, "completed").Count(&ready)
 	publishPagesReady(book, int(ready))
 
-	// Auto-enqueue the next batch if there's more to do (and not free-capped).
+	// Auto-enqueue the next batch if there's more to do (and not quota-capped).
 	var pendingBeyond int64
 	db.Model(&BookChunk{}).Where("book_id = ? AND \"index\" > ? AND tts_status <> ?", p.BookID, p.EndPage, "completed").Count(&pendingBeyond)
 	if !capped && pendingBeyond > 0 {
-		if err := enqueueTranscribeBatch(p.BookID, p.EndPage+1, p.EndPage+batchSizePages, p.UserID, p.AccountType); err != nil {
+		// Pause-ahead: for free users, don't transcribe more than
+		// PAUSE_AHEAD_PAGES beyond where they're currently listening. Resumed by
+		// UpdatePlaybackProgressHandler when the listener advances.
+		nextStart := p.EndPage + 1
+		if p.AccountType == "free" && nextStart > listenerChunkIndex(p.UserID, p.BookID)+pauseAheadPages() {
+			db.Model(&Book{}).Where("id = ?", p.BookID).Update("status", "paused_ahead")
+			log.Printf("⏸️ book %d paused ahead (next page %d, listener+window)", p.BookID, nextStart)
+			return nil
+		}
+		if err := enqueueTranscribeBatch(p.BookID, nextStart, p.EndPage+batchSizePages, p.UserID, p.AccountType); err != nil {
 			log.Printf("⚠️ failed to enqueue next batch for book %d: %v", p.BookID, err)
 		}
 		return nil

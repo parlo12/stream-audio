@@ -22,6 +22,13 @@ type initiateUploadReq struct {
 func initiateUploadHandler(c *gin.Context) {
 	book := c.MustGet("book").(Book) // ownership verified by middleware
 	userID := getUserIDFromContext(c)
+	accountType := accountTypeFromClaims(c)
+
+	// Uploads quota pre-check (consumed on /complete, once per book).
+	if d := checkAndConsume(userID, accountType, "uploads", 0, book.ID); !d.Allowed {
+		quota429(c, d)
+		return
+	}
 
 	var req initiateUploadReq
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -96,6 +103,11 @@ func completeUploadHandler(c *gin.Context) {
 	if !ok {
 		c.JSON(http.StatusConflict, gin.H{"error": "uploaded object not found in storage"})
 		return
+	}
+	// Count the upload once (only on the first completion — status is still
+	// awaiting_upload; idempotent on repeat calls).
+	if book.Status == "awaiting_upload" {
+		checkAndConsume(getUserIDFromContext(c), accountTypeFromClaims(c), "uploads", 1, book.ID)
 	}
 	db.Model(&Book{}).Where("id = ?", book.ID).Update("status", "parsing")
 	if err := enqueueParseBook(book.ID); err != nil {

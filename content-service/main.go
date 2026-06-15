@@ -127,6 +127,11 @@ func main() {
 	// MQTT initialization
 	go InitMQTT()
 
+	// Redis counter client for quotas (every mode — workers consume too).
+	if err := initRedis(); err != nil {
+		log.Fatalf("FATAL: redis (quota) init failed: %v", err)
+	}
+
 	// Job-queue enqueuer (asynq) — needed in every mode.
 	if err := initQueueClient(); err != nil {
 		log.Fatalf("FATAL: queue client init failed: %v", err)
@@ -298,9 +303,10 @@ func setupDatabase() {
 	// Only the API owns schema migrations. Workers skip AutoMigrate so a
 	// co-deploy doesn't race two concurrent CREATE TABLEs (Postgres DDL race).
 	if getEnv("RUN_MODE", "both") != "worker" {
-		if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}, &PlaybackProgress{}, &TranscriptionBatch{}); err != nil {
+		if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}, &PlaybackProgress{}, &TranscriptionBatch{}, &PlanLimit{}, &UsageEvent{}); err != nil {
 			log.Fatalf("AutoMigrate failed: %v", err)
 		}
+		seedPlanLimits()
 	}
 	log.Println("Database connected and migrated successfully")
 }
@@ -684,16 +690,6 @@ func getUserAccountType(token string) (string, error) {
 	return result.AccountType, nil
 }
 
-// freeTierPageLimit is the max number of completed pages a free user may have.
-func freeTierPageLimit() int64 {
-	if v := os.Getenv("FREE_TIER_PAGE_LIMIT"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			return n
-		}
-	}
-	return 1
-}
-
 func BatchTranscribeBookHandler(c *gin.Context) {
 	// Ownership already verified by requireBookOwnership(); reuse the book.
 	book := c.MustGet("book").(Book)
@@ -719,18 +715,11 @@ func BatchTranscribeBookHandler(c *gin.Context) {
 		accountType = at
 	}
 
-	freeLimit := freeTierPageLimit()
-	if accountType == "free" {
-		var completedChunks int64
-		db.Model(&BookChunk{}).
-			Joins("JOIN books ON books.id = book_chunks.book_id").
-			Where("book_chunks.tts_status = ? AND books.user_id = ?", "completed", userID).
-			Count(&completedChunks)
-
-		if completedChunks >= freeLimit {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Free trial limit reached. Upgrade your plan to continue transcribing."})
-			return
-		}
+	// Quota pre-check: deny up front if the user is already at their monthly
+	// transcription-page budget (per-page consumption happens in the worker).
+	if d := checkAndConsume(userID, accountType, "transcribe_pages", 0, book.ID); !d.Allowed {
+		quota429(c, d)
+		return
 	}
 
 	var chunks []BookChunk

@@ -18,25 +18,15 @@ func ProcessChunksTTSHandler(c *gin.Context) {
 		return
 	}
 
-	accountType, err := getUserAccountType(token)
-	if err != nil {
-		log.Printf("Error checking account type: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify account type"})
-		return
-	}
-
-	if accountType == "free" {
-		var completedChunks int64
-		userID := getUserIDFromContext(c)
-		db.Model(&BookChunk{}).
-			Joins("JOIN books ON books.id = book_chunks.book_id").
-			Where("book_chunks.tts_status = ? AND books.user_id = ?", "completed", userID).
-			Count(&completedChunks)
-
-		if completedChunks >= 1 {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Free trial limit reached. Upgrade your plan to continue transcribing."})
+	accountType := accountTypeFromClaims(c)
+	if accountType == "" {
+		at, err := getUserAccountType(token)
+		if err != nil {
+			log.Printf("Error checking account type: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify account type"})
 			return
 		}
+		accountType = at
 	}
 
 	var req struct {
@@ -52,6 +42,12 @@ func ProcessChunksTTSHandler(c *gin.Context) {
 	// don't reveal that another user's book exists.
 	if _, err := verifyBookOwnership(req.BookID, getUserIDFromContext(c)); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Book not found"})
+		return
+	}
+
+	// Quota: consume the transcription pages this request will process.
+	if d := checkAndConsume(getUserIDFromContext(c), accountType, "transcribe_pages", int64(len(req.Pages)), req.BookID); !d.Allowed {
+		quota429(c, d)
 		return
 	}
 

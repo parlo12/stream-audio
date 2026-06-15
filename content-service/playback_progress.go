@@ -161,6 +161,10 @@ func UpdatePlaybackProgressHandler(c *gin.Context) {
 		log.Printf("✅ Updated progress for user %d, book %d to %.2fs (%.1f%%, total: %.0fs)", userID, book.ID, req.CurrentPosition, completionPercent, progress.TotalListenTime)
 	}
 
+	// If this book was paused ahead of the listener, advancing may release the
+	// next transcription batch (Phase 4 pause-ahead resume).
+	maybeResumeTranscription(accountTypeFromClaims(c), book.ID, progress.ChunkIndex)
+
 	// 8. Return updated progress
 	c.JSON(http.StatusOK, ProgressResponse{
 		BookID:            progress.BookID,
