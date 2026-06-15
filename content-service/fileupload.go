@@ -108,8 +108,17 @@ func uploadBookFileHandler(c *gin.Context) {
 		return
 	}
 
+	// Upload the source document to R2; store the object key. The local `dest`
+	// remains on disk for the chunking step below (extraction reads it
+	// directly), then becomes scratch.
+	srcKey := uploadKey(userID, book.ID, ext)
+	if err := store.PutFile(c.Request.Context(), srcKey, dest, contentTypeForExt(dest)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to store upload", "details": err.Error()})
+		return
+	}
+
 	// Update book record
-	book.FilePath = dest
+	book.FilePath = srcKey
 	book.Status = "processing"
 	book.ContentHash = hash
 	if err := db.Save(&book).Error; err != nil {

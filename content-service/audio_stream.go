@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 
@@ -27,10 +26,9 @@ func streamMergedChunkAudioHandler(c *gin.Context) {
 		return
 	}
 
-	// Serve the latest merged audio (use first match)
-	audioPath := matches[len(matches)-1]
-	c.Header("Content-Type", "audio/mpeg")
-	c.File(audioPath)
+	// Serve the latest merged audio (use first match). This legacy endpoint
+	// globs local disk; serveMedia handles the on-disk file.
+	serveMedia(c, matches[len(matches)-1])
 }
 
 func streamSinglePageAudioHandler(c *gin.Context) {
@@ -62,13 +60,7 @@ func streamSinglePageAudioHandler(c *gin.Context) {
         c.JSON(http.StatusNotFound, gin.H{"error": "Audio not ready for this page"})
         return
     }
-    
-    // Check if file exists on disk
-    if _, err := os.Stat(chunk.FinalAudioPath); err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "Audio file missing on disk"})
-        return
-    }
-    
-    c.Header("Content-Type", "audio/mpeg")
-    c.File(chunk.FinalAudioPath)
+
+    // Serve from R2 (302 presigned) or legacy disk (fallback).
+    serveMedia(c, chunk.FinalAudioPath)
 }

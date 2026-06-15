@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,17 +61,31 @@ func processMergedChunks(bookID uint) error {
 		return fmt.Errorf("failed to save content hash: %w", err)
 	}
 
-	// 6. Combine audio into a single MP3 using FFmpeg concat
+	// 6. Combine audio into a single MP3 using FFmpeg concat. Per-chunk audio
+	// lives in R2 (object keys) — localize each input to a temp file first.
 	listFile := fmt.Sprintf("./audio/audio_list_%d.txt", time.Now().Unix())
 	listHandle, err := os.Create(listFile)
 	if err != nil {
 		return fmt.Errorf("failed to create audio list: %w", err)
 	}
+	var cleanups []func()
+	defer func() {
+		for _, fn := range cleanups {
+			fn()
+		}
+		os.Remove(listFile)
+	}()
 	for _, ch := range chunks {
 		if !strings.HasSuffix(ch.AudioPath, ".mp3") {
 			continue
 		}
-		absPath, _ := filepath.Abs(ch.AudioPath)
+		local, cleanup, lerr := localizeMedia(context.Background(), ch.AudioPath)
+		if lerr != nil {
+			log.Printf("⚠️ could not localize chunk audio %s: %v", ch.AudioPath, lerr)
+			continue
+		}
+		cleanups = append(cleanups, cleanup)
+		absPath, _ := filepath.Abs(local)
 		fmt.Fprintf(listHandle, "file '%s'\n", absPath)
 	}
 	listHandle.Close()
@@ -80,18 +96,25 @@ func processMergedChunks(bookID uint) error {
 		return fmt.Errorf("ffmpeg merge fail: %v\n%s", err, output)
 	}
 
-	// 7. Call sound effects pipeline with temporary Book struct
+	// Upload the merged group audio to R2; store its key.
+	groupKey, uerr := uploadArtifact(context.Background(), mergedAudio, groupAudioKey(bookID, startIdx, endIdx))
+	if uerr != nil {
+		return fmt.Errorf("failed to upload merged group: %w", uerr)
+	}
+
+	// 7. Call sound effects pipeline with temporary Book struct (textFile is
+	// a local path for analysis context).
 	book := Book{
 		ID:          bookID,
 		FilePath:    textFile,
-		AudioPath:   mergedAudio,
+		AudioPath:   groupKey,
 		ContentHash: contentHash,
 	}
 
 	go processSoundEffectsAndMerge(book, contentHash, pageIndexes) // Page index is not used in this context
 
-	// 8. Save to processed chunk group table
-	if err := saveProcessedChunkGroup(bookID, startIdx, endIdx, mergedAudio); err != nil {
+	// 8. Save to processed chunk group table (object key)
+	if err := saveProcessedChunkGroup(bookID, startIdx, endIdx, groupKey); err != nil {
 		return fmt.Errorf("failed to save chunk group metadata: %w", err)
 	}
 

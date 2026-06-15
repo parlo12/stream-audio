@@ -135,9 +135,11 @@ Backend-deployable slice shipped this pass; the monolith split, versioned migrat
 
 Also done this pass (deferred from Phase 2): **S10** ✅ — admin `audit_logs` table + `auditMiddleware` on every `/admin` mutation; `/admin/system/wipe` now requires a short-lived single-use server nonce (`POST /admin/system/wipe/request`) instead of a hardcoded string. **S5** remains disabled (410) by decision.
 
-### Phase 6 — Hand off to the architecture migration
+### Phase 6 — Architecture migration (started — June 15, 2026)
 
-With the above done, start [structureImprovmentPlan.md](structureImprovmentPlan.md) Phase 1 (object storage + CDN). The mapping of prerequisites:
+**structureImprovmentPlan.md Phase 1 (storage swap) — code complete, pending R2 creds to deploy.** Switched to **Cloudflare R2** (S3-compatible): new `mediastore.go` (`MediaStore` interface + R2 impl via aws-sdk-go-v2, presigned GETs, key builders); all audio/cover/upload write sites upload finished artifacts to R2 and store object keys; all stream handlers `302`-redirect to presigned URLs with a **legacy on-disk fallback** for un-migrated rows. Deploy is gated on the R2 token (content-service `log.Fatal`s without R2 env) + an `rclone` migration of `/opt/stream-audio-data` + a DB path→key rewrite. **Follow-ups noted:** auto-fetched covers (web-search path) still write locally; cascade-delete doesn't yet `store.Delete` R2 objects (orphans, not data loss). Then structure Phases 2–5 (queue/worker, presigned uploads, quotas/APNs, HLS).
+
+The prerequisite mapping:
 
 | Architecture-plan phase | Blocked by (now fixed) |
 |---|---|

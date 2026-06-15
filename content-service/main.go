@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -115,6 +117,16 @@ func main() {
 	// }
 	// Set up the database connection and run migrations.
 	setupDatabase()
+
+	// Initialize object storage (Cloudflare R2). Media is stored in R2 and
+	// streamed via presigned URLs; the service can't serve media without it.
+	var serr error
+	store, serr = newR2StoreFromEnv()
+	if serr != nil {
+		log.Fatalf("FATAL: media storage not configured: %v", serr)
+	}
+	log.Println("✅ Media store (R2) initialized")
+
 	// MQTT initialization
 	go InitMQTT()
 	//Initializaton for TTS worker
@@ -806,13 +818,19 @@ func BatchTranscribeBookHandler(c *gin.Context) {
 				continue
 			}
 
-			// The batch path runs no separate Foley overlay, so the merged
-			// audio is the deliverable: set final_audio_path too, otherwise
-			// the /pages/:page/audio handler (which serves final_audio_path)
-			// 404s for batch-transcribed pages.
+			// Upload the finished mix to R2 and store the object key. The batch
+			// path runs no separate Foley overlay, so the merged audio is the
+			// deliverable for both audio_path and final_audio_path.
+			key, uerr := uploadArtifact(context.Background(), mergedAudio,
+				audioPageKey(book.ID, chunk.Index, hash, filepath.Ext(mergedAudio)))
+			if uerr != nil {
+				log.Printf("R2 upload failed for chunk %d: %v", chunk.ID, uerr)
+				db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "failed")
+				continue
+			}
 			db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Updates(map[string]interface{}{
-				"audio_path":       mergedAudio,
-				"final_audio_path": mergedAudio,
+				"audio_path":       key,
+				"final_audio_path": key,
 				"tts_status":       "completed",
 			})
 		}

@@ -55,7 +55,7 @@ func streamAudioByChunkIDsHandler(c *gin.Context) {
 	endIdx := chunks[len(chunks)-1].Index
 
 	if audioPath, found := checkIfChunkGroupProcessed(req.BookID, startIdx, endIdx); found {
-		c.File(audioPath)
+		serveMedia(c, audioPath)
 		return
 	}
 

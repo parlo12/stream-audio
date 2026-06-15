@@ -28,5 +28,5 @@ func streamChunkGroupAudioHandler(c *gin.Context) {
 		return
 	}
 
-	c.File(audioPath)
+	serveMedia(c, audioPath)
 }

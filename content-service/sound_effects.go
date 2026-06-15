@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -996,9 +998,14 @@ func processSoundEffectsAndMerge(book Book, hash string, pageIndexes []int) {
 			continue
 		}
 
-		// Ensure TTS audio file exists
-		if chunk.AudioPath == "" || !fileExists(chunk.AudioPath) {
-			log.Printf("🚫 No TTS audio found for chunk index %d: %s", idx, chunk.AudioPath)
+		// Localize the per-chunk TTS audio (may be an R2 key or a local path).
+		if chunk.AudioPath == "" {
+			log.Printf("🚫 No TTS audio for chunk index %d", idx)
+			continue
+		}
+		ttsLocal, cleanupTTS, lerr := localizeMedia(context.Background(), chunk.AudioPath)
+		if lerr != nil {
+			log.Printf("🚫 Could not localize TTS audio for chunk index %d: %v", idx, lerr)
 			continue
 		}
 
@@ -1006,6 +1013,7 @@ func processSoundEffectsAndMerge(book Book, hash string, pageIndexes []int) {
 		prompt, err := generateOverallSoundPrompt(chunk.Content)
 		if err != nil {
 			log.Printf("prompt err for chunk index %d: %v", idx, err)
+			cleanupTTS()
 			continue
 		}
 
@@ -1013,20 +1021,23 @@ func processSoundEffectsAndMerge(book Book, hash string, pageIndexes []int) {
 		bg, err := getOrGenerateBackgroundMusic(prompt)
 		if err != nil {
 			log.Printf("music err for chunk index %d: %v", idx, err)
+			cleanupTTS()
 			continue
 		}
 
 		log.Printf("🎶 Background music ready: %s", bg)
 
 		// Mix audio (Q1: pass the page text for mood/ambient analysis).
-		mixedPath, err := mergeAudio(chunk.AudioPath, bg, book, idx, chunk.Content, hash)
+		mixedPath, err := mergeAudio(ttsLocal, bg, book, idx, chunk.Content, hash)
 		if err != nil {
 			log.Printf("mergeAudio err for page index %d: %v", idx, err)
+			cleanupTTS()
 			continue
 		}
 
 		// Extract & overlay sound effects (Q1: this page's text).
-		ttsDur, _ := getTTSDuration(chunk.AudioPath)
+		ttsDur, _ := getTTSDuration(ttsLocal)
+		cleanupTTS() // TTS input no longer needed
 		events, err := extractSoundEvents(chunk.Content, ttsDur)
 		if err == nil {
 			fxPath, err := overlaySoundEvents(mixedPath, events, book, idx)
@@ -1038,14 +1049,19 @@ func processSoundEffectsAndMerge(book Book, hash string, pageIndexes []int) {
 			}
 		}
 
-		// ✅ Update the final_audio_path for this chunk only
-		err = db.Model(&BookChunk{}).
+		// Upload the finished page audio to R2 and store its object key.
+		key, uerr := uploadArtifact(context.Background(), mixedPath,
+			audioPageKey(book.ID, idx, hash, filepath.Ext(mixedPath)))
+		if uerr != nil {
+			log.Printf("❌ R2 upload failed for book_id=%d page=%d: %v", book.ID, idx, uerr)
+			continue
+		}
+		if err := db.Model(&BookChunk{}).
 			Where("book_id = ? AND \"index\" = ?", book.ID, idx).
-			Update("final_audio_path", mixedPath).Error
-		if err != nil {
+			Update("final_audio_path", key).Error; err != nil {
 			log.Printf("❌ Failed to update final_audio_path for book_id=%d page=%d: %v", book.ID, idx, err)
 		} else {
-			log.Printf("✅ Updated final_audio_path for book_id=%d page=%d → %s", book.ID, idx, mixedPath)
+			log.Printf("✅ Updated final_audio_path for book_id=%d page=%d → %s", book.ID, idx, key)
 		}
 		// Temp files are cleaned up per-job inside mergeAudio (B4).
 	}

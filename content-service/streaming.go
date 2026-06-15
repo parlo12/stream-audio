@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"net/http"
-	"os"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt"
@@ -71,13 +70,6 @@ func proxyBookAudioHandler(c *gin.Context) {
 		return
 	}
 
-	if _, err := os.Stat(book.AudioPath); os.IsNotExist(err) {
-		fmt.Println("❌ Audio file not found on disk:", book.AudioPath)
-		c.JSON(http.StatusNotFound, gin.H{"error": "Audio file not found on server", "details": err.Error()})
-		return
-	}
-
-	fmt.Println("🎧 Serving audio file:", book.AudioPath)
-	c.Header("Content-Type", "audio/mpeg")
-	c.File(book.AudioPath)
+	fmt.Println("🎧 Serving audio:", book.AudioPath)
+	serveMedia(c, book.AudioPath)
 }

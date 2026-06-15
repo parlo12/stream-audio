@@ -4,11 +4,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,33 +32,37 @@ func uploadBookCoverHandler(c *gin.Context) {
 		return
 	}
 
-	// save file quickly
+	// save file quickly to a local temp (then upload to R2)
 	uploadDir := "./uploads/covers"
 	os.MkdirAll(uploadDir, os.ModePerm)
-	filename := fmt.Sprintf("%s_%d%s", bookID, time.Now().Unix(), ext)
-	dest := filepath.Join(uploadDir, filename)
+	seed := fmt.Sprintf("%s_%d", bookID, time.Now().Unix())
+	dest := filepath.Join(uploadDir, seed+ext)
 	c.SaveUploadedFile(file, dest)
 
-	// immediate response
-	host := getEnv("STREAM_HOST", "https://narrafied.com")
-	coverURL := fmt.Sprintf("%s/covers/%s", host, filename)
+	// Deterministic R2 key + public URL (covers are public for discovery).
+	bidU, _ := strconv.ParseUint(bookID, 10, 64)
+	key := coverKey(uint(bidU), seed, ext)
+	coverURL := store.PublicURL(key)
 	c.JSON(http.StatusAccepted, gin.H{"message": "upload in progress", "cover_url": coverURL})
 
-	// async DB + MQTT
-	go func(bID, path, url string) {
+	// async upload + DB + MQTT
+	go func(bID, localPath, objKey, url string) {
+		if _, err := uploadArtifact(context.Background(), localPath, objKey); err != nil {
+			fmt.Println("cover R2 upload failed:", err)
+			return
+		}
 		var book Book
 		if err := db.First(&book, bID).Error; err != nil {
 			fmt.Println("book lookup failed:", err)
 			return
 		}
-		book.CoverPath = path
+		book.CoverPath = objKey
 		book.CoverURL = url
 		db.Save(&book)
 
-		// publish via MQTT
 		payload := map[string]interface{}{"book_id": book.ID, "cover_url": url, "timestamp": time.Now().UTC().Format(time.RFC3339)}
 		data, _ := json.Marshal(payload)
 		topic := fmt.Sprintf("users/%d/cover_uploaded", book.UserID)
 		PublishEvent(topic, data)
-	}(bookID, dest, coverURL)
+	}(bookID, dest, key, coverURL)
 }

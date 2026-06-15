@@ -8,6 +8,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -609,8 +610,15 @@ func processBookConversion(book Book) {
 		log.Printf("⚠️ Error checking for existing audio: %v", err)
 	}
 
-	// 3) Read file content
-	contentBytes, err := os.ReadFile(book.FilePath)
+	// 3) Read file content (FilePath may be an R2 key — localize first).
+	srcPath, cleanupSrc, lerr := localizeMedia(context.Background(), book.FilePath)
+	if lerr != nil {
+		log.Printf("📛 Error localizing source for book ID %d: %v", book.ID, lerr)
+		updateBookStatus(book.ID, "failed")
+		return
+	}
+	defer cleanupSrc()
+	contentBytes, err := os.ReadFile(srcPath)
 	if err != nil {
 		log.Printf("📛 Error reading file for book ID %d: %v", book.ID, err)
 		updateBookStatus(book.ID, "failed")
@@ -626,9 +634,17 @@ func processBookConversion(book Book) {
 	}
 	log.Printf("✅ TTS audio file generated: %s for book ID %d", ttsPath, book.ID)
 
+	// Upload whole-book audio to R2; store the object key.
+	audioKey, uerr := uploadArtifact(context.Background(), ttsPath, bookAudioKey(book.ID))
+	if uerr != nil {
+		log.Printf("📛 Error uploading book audio for book ID %d: %v", book.ID, uerr)
+		updateBookStatus(book.ID, "failed")
+		return
+	}
+
 	// 5) Save TTS result before adding effects
 	if err := db.Model(&Book{}).Where("id = ?", book.ID).Updates(map[string]interface{}{
-		"audio_path": ttsPath,
+		"audio_path": audioKey,
 		"status":     "TTS completed",
 	}).Error; err != nil {
 		log.Printf("⚠️ Error updating TTS result for book ID %d: %v", book.ID, err)
