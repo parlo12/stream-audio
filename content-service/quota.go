@@ -50,18 +50,20 @@ func initRedis() error {
 // seedPlanLimits inserts placeholder per-tier limits if the table is empty.
 // Adjust these rows via SQL to match the real cost model — no redeploy needed.
 func seedPlanLimits() {
-	var n int64
-	db.Model(&PlanLimit{}).Count(&n)
-	if n > 0 {
-		return
-	}
-	db.Create(&[]PlanLimit{
+	// Idempotent per-row: inserts any missing default metric without
+	// overwriting limits an operator has customized via SQL.
+	defaults := []PlanLimit{
 		{AccountType: "free", Metric: "transcribe_pages", MonthlyLimit: 20, HardCap: true},
 		{AccountType: "free", Metric: "uploads", MonthlyLimit: 1, HardCap: true},
+		{AccountType: "free", Metric: "stream_pages", MonthlyLimit: 2000, HardCap: false}, // abuse cap, not a paywall
 		{AccountType: "paid", Metric: "transcribe_pages", MonthlyLimit: 1000, HardCap: false},
 		{AccountType: "paid", Metric: "uploads", MonthlyLimit: 20, HardCap: false},
-	})
-	log.Println("🌱 seeded default plan_limits")
+		{AccountType: "paid", Metric: "stream_pages", MonthlyLimit: 100000, HardCap: false},
+	}
+	for _, d := range defaults {
+		row := d
+		db.Where(PlanLimit{AccountType: d.AccountType, Metric: d.Metric}).FirstOrCreate(&row)
+	}
 }
 
 // QuotaDecision is the result of a quota check.

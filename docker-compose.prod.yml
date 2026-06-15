@@ -137,6 +137,23 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # asynq queue dashboard (read-only ops view). Bound to localhost; nginx
+  # fronts it at /admin/queues/ with basic auth.
+  asynqmon:
+    image: hibiken/asynqmon:latest
+    restart: always
+    command: ["--redis-addr=redis:6379", "--port=8085"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8085:8085"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   # Redis persistence
   redis_data:

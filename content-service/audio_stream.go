@@ -61,6 +61,12 @@ func streamSinglePageAudioHandler(c *gin.Context) {
         return
     }
 
+    // Streaming quota (abuse-prevention; approximate — re-seeks recount).
+    if d := checkAndConsume(getUserIDFromContext(c), accountTypeFromClaims(c), "stream_pages", 1, uint(bookID)); !d.Allowed {
+        quota429(c, d)
+        return
+    }
+
     // Serve from R2 (302 presigned) or legacy disk (fallback).
     serveMedia(c, chunk.FinalAudioPath)
 }
