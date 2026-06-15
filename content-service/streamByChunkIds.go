@@ -106,8 +106,8 @@ func recoverStuckPipeline() {
 	if r := db.Model(&BookChunk{}).Where("tts_status = ?", "processing").Update("tts_status", "failed"); r.Error == nil && r.RowsAffected > 0 {
 		log.Printf("♻️ reset %d chunk(s) stuck in 'processing' → 'failed'", r.RowsAffected)
 	}
-	if r := db.Model(&Book{}).Where("status = ?", "processing").Update("status", "pending"); r.Error == nil && r.RowsAffected > 0 {
-		log.Printf("♻️ reset %d book(s) stuck in 'processing' → 'pending'", r.RowsAffected)
+	if r := db.Model(&Book{}).Where("status = ?", "transcribing").Update("status", "pending"); r.Error == nil && r.RowsAffected > 0 {
+		log.Printf("♻️ reset %d book(s) stuck in 'transcribing' → 'pending'", r.RowsAffected)
 	}
 }
 

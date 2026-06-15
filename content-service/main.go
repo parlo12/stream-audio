@@ -725,11 +725,12 @@ func BatchTranscribeBookHandler(c *gin.Context) {
 		return
 	}
 
-	// B6: atomic job lock — only one transcription may run per book. Claim the
-	// book by flipping status to 'processing' only if it isn't already.
+	// B6: atomic job lock — only one transcription may run per book. Use a
+	// dedicated 'transcribing' sentinel (NOT 'processing', which upload already
+	// sets to mean "uploaded/ready"); claim only if not already transcribing.
 	claim := db.Model(&Book{}).
-		Where("id = ? AND status <> ?", book.ID, "processing").
-		Update("status", "processing")
+		Where("id = ? AND status <> ?", book.ID, "transcribing").
+		Update("status", "transcribing")
 	if claim.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not lock book for processing"})
 		return
