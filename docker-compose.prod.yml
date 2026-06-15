@@ -65,7 +65,8 @@ services:
       dockerfile: content-service/Dockerfile
     restart: always
     env_file: .env
-    environment:
+    environment: &content-env
+      RUN_MODE: "api"
       GIN_MODE: "release"
       DB_SSLMODE: "${DB_SSLMODE:-require}"
       PGSSLMODE: "${PGSSLMODE:-require}"
@@ -103,6 +104,33 @@ services:
       - content-covers-persistent:/app/uploads/covers
       - content-uploads:/app/uploads
       - ./logs/content:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Worker fleet: consumes the asynq queue (transcription, merges, covers).
+  # Same image as content-service; no HTTP port. Scale with --scale content-worker=N.
+  content-worker:
+    build:
+      context: .
+      dockerfile: content-service/Dockerfile
+    restart: always
+    env_file: .env
+    environment:
+      <<: *content-env
+      RUN_MODE: "worker"
+    depends_on:
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    volumes:
+      - content-audio-persistent:/app/audio
+      - content-covers-persistent:/app/uploads/covers
+      - content-uploads:/app/uploads
+      - ./logs/worker:/app/logs
     logging:
       driver: "json-file"
       options:

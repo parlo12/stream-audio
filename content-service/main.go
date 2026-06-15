@@ -1,15 +1,12 @@
 package main
 
 import (
-	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -129,8 +126,29 @@ func main() {
 
 	// MQTT initialization
 	go InitMQTT()
-	//Initializaton for TTS worker
-	go startTTSWorker()
+
+	// Job-queue enqueuer (asynq) — needed in every mode.
+	if err := initQueueClient(); err != nil {
+		log.Fatalf("FATAL: queue client init failed: %v", err)
+	}
+
+	// RUN_MODE selects the role: api (HTTP only), worker (asynq consumer only),
+	// or both (default — local dev).
+	mode := getEnv("RUN_MODE", "both")
+	if mode == "worker" {
+		log.Println("▶ RUN_MODE=worker (asynq consumer, no HTTP)")
+		if err := startAsyncWorker(); err != nil { // blocks
+			log.Fatalf("asynq worker failed: %v", err)
+		}
+		return
+	}
+	if mode == "both" {
+		go func() {
+			if err := startAsyncWorker(); err != nil {
+				log.Printf("⚠️ asynq worker stopped: %v", err)
+			}
+		}()
+	}
 
 	// Initialize Gin router.
 	router := gin.Default()
@@ -272,7 +290,7 @@ func setupDatabase() {
 
 	log.Printf("Connected to database host=%s dbname=%s sslmode=%s", dbHost, dbName, sslMode)
 
-	if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}, &PlaybackProgress{}); err != nil {
+	if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}, &PlaybackProgress{}, &TranscriptionBatch{}); err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
 	}
 	log.Println("Database connected and migrated successfully")
@@ -322,41 +340,10 @@ func createBookHandler(c *gin.Context) {
 		return
 	}
 
-	// Automatically fetch book cover from the web using OpenAI web search
-	go func(b Book) {
-		log.Printf("🔍 Fetching book cover for '%s' by %s...", b.Title, b.Author)
-
-		localPath, publicURL, err := fetchAndSaveBookCover(b.Title, b.Author, fmt.Sprintf("%d", b.ID))
-		if err != nil {
-			log.Printf("⚠️ Failed to fetch book cover for book ID %d: %v", b.ID, err)
-			// Don't fail the book creation, just log the error
-			return
-		}
-
-		// Update the book record with cover information
-		// Note: GORM map keys must use snake_case database column names, not Go field names
-		if err := db.Model(&Book{}).Where("id = ?", b.ID).Updates(map[string]interface{}{
-			"cover_path": localPath,
-			"cover_url":  publicURL,
-		}).Error; err != nil {
-			log.Printf("⚠️ Failed to update book cover for book ID %d: %v", b.ID, err)
-			return
-		}
-		log.Printf("✅ Auto-fetch saved cover_url to database for book %d: %s", b.ID, publicURL)
-
-		// Publish MQTT event
-		payload := map[string]interface{}{
-			"book_id":   b.ID,
-			"cover_url": publicURL,
-			"timestamp": time.Now().UTC().Format(time.RFC3339),
-			"source":    "web_search",
-		}
-		data, _ := json.Marshal(payload)
-		topic := fmt.Sprintf("users/%d/cover_uploaded", b.UserID)
-		PublishEvent(topic, data)
-
-		log.Printf("✅ Book cover automatically fetched and saved for book ID %d", b.ID)
-	}(book)
+	// Automatically fetch the book cover on the worker fleet (durable).
+	if err := enqueueFetchCover(book.ID, book.Title, book.Author); err != nil {
+		log.Printf("⚠️ Failed to enqueue cover fetch for book %d: %v", book.ID, err)
+	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Book saved, cover fetching in progress", "book": book})
 }
@@ -763,93 +750,16 @@ func BatchTranscribeBookHandler(c *gin.Context) {
 		return
 	}
 
-	go func() {
-		for _, chunk := range chunks {
-			// B6: free-tier cap enforced INSIDE the loop (local DB count, no
-			// per-page HTTP) so a free user can't transcribe a whole book.
-			if accountType == "free" {
-				var completed int64
-				db.Model(&BookChunk{}).
-					Joins("JOIN books ON books.id = book_chunks.book_id").
-					Where("book_chunks.tts_status = ? AND books.user_id = ?", "completed", userID).
-					Count(&completed)
-				if completed >= freeLimit {
-					log.Printf("🛑 Free-tier cap (%d) reached for user %d; stopping batch for book %d", freeLimit, userID, book.ID)
-					break
-				}
-			}
-
-			// Q6: atomically claim the chunk so concurrent loops can't double-process.
-			claimChunk := db.Model(&BookChunk{}).
-				Where("id = ? AND tts_status NOT IN ?", chunk.ID, []string{"processing", "completed"}).
-				Update("tts_status", "processing")
-			if claimChunk.RowsAffected == 0 {
-				continue
-			}
-
-			audioPath, err := convertTextToAudio(chunk.Content, chunk.ID)
-			if err != nil {
-				db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "failed")
-				continue
-			}
-
-			hash := fmt.Sprintf("%x", sha256.Sum256([]byte(chunk.Content)))
-
-			// Q1: analyze and score this page's own text.
-			bgPrompt, err := generateOverallSoundPrompt(chunk.Content)
-			if err != nil {
-				log.Printf("Prompt generation failed for chunk %d: %v", chunk.ID, err)
-				db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "failed")
-				continue
-			}
-
-			// Q3: reuse cached music for identical prompts.
-			bgMusic, err := getOrGenerateBackgroundMusic(bgPrompt)
-			if err != nil {
-				log.Printf("Music generation failed for chunk %d: %v", chunk.ID, err)
-				db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "failed")
-				continue
-			}
-
-			mergedAudio, err := mergeAudio(audioPath, bgMusic, book, chunk.Index, chunk.Content, hash)
-			if err != nil {
-				log.Printf("Audio merge failed for chunk %d: %v", chunk.ID, err)
-				db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "failed")
-				continue
-			}
-
-			// Upload the finished mix to R2 and store the object key. The batch
-			// path runs no separate Foley overlay, so the merged audio is the
-			// deliverable for both audio_path and final_audio_path.
-			key, uerr := uploadArtifact(context.Background(), mergedAudio,
-				audioPageKey(book.ID, chunk.Index, hash, filepath.Ext(mergedAudio)))
-			if uerr != nil {
-				log.Printf("R2 upload failed for chunk %d: %v", chunk.ID, uerr)
-				db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "failed")
-				continue
-			}
-			db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Updates(map[string]interface{}{
-				"audio_path":       key,
-				"final_audio_path": key,
-				"tts_status":       "completed",
-			})
-		}
-
-		// Release the book lock: completed if nothing remains, else back to
-		// 'pending' so a retry can re-claim it (never leave it stuck in
-		// 'processing').
-		var remaining int64
-		db.Model(&BookChunk{}).Where("book_id = ? AND tts_status != ?", book.ID, "completed").Count(&remaining)
-		if remaining == 0 {
-			db.Model(&Book{}).Where("id = ?", book.ID).Update("status", "completed")
-			log.Printf("✅ Book %d fully transcribed", book.ID)
-		} else {
-			db.Model(&Book{}).Where("id = ?", book.ID).Update("status", "pending")
-			log.Printf("ℹ️ Book %d batch ended with %d chunks remaining", book.ID, remaining)
-		}
-	}()
-
-	c.JSON(http.StatusAccepted, gin.H{"message": "Batch transcription started in background"})
+	// Enqueue the first 20-page batch (durable, on the worker fleet). The
+	// worker auto-enqueues subsequent batches as each completes, fires an MQTT
+	// "pages ready" event, and releases the book lock when done.
+	start := chunks[0].Index
+	if err := enqueueTranscribeBatch(book.ID, start, start+batchSizePages-1, userID, accountType); err != nil {
+		db.Model(&Book{}).Where("id = ?", book.ID).Update("status", "pending")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not enqueue transcription", "details": err.Error()})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"message": "Transcription queued"})
 }
 
 // accountTypeFromClaims returns the account_type embedded in the JWT, or "" if

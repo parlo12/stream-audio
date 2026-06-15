@@ -1,18 +1,11 @@
 package main
 
 import (
-	"errors"
-	"fmt"
-	"log"
 	"net/http"
 	"sort"
 	"strings"
-	"sync"
-	"time"
-	
 
 	"github.com/gin-gonic/gin"
-	"gorm.io/gorm"
 )
 
 // StreamByChunkIDsRequest is the request payload for streaming by chunk IDs.
@@ -20,8 +13,6 @@ type StreamByChunkIDsRequest struct {
 	ChunkIDs []uint `json:"chunk_ids" binding:"required,min=1,max=10"`
 	BookID   uint   `json:"book_id" binding:"required"`
 }
-
-var once sync.Once
 
 // streamAudioByChunkIDsHandler streams audio by matching chunk IDs.
 func streamAudioByChunkIDsHandler(c *gin.Context) {
@@ -68,23 +59,12 @@ func streamAudioByChunkIDsHandler(c *gin.Context) {
 		return
 	}
 
-	// Save job to DB
-	job := TTSQueueJob{
-		BookID:   req.BookID,
-		ChunkIDs: joinUintSlice(req.ChunkIDs),
-		Status:   "queued",
-		UserID:   userID,
+	// Enqueue the merge on the worker fleet (durable; replaces TTSQueueJob).
+	if err := enqueueMergeChunks(req.BookID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not queue request", "details": err.Error()})
+		return
 	}
-	db.Create(&job)
 	c.JSON(http.StatusAccepted, gin.H{"message": "Your request has been queued."})
-}
-
-func joinUintSlice(nums []uint) string {
-	var parts []string
-	for _, n := range nums {
-		parts = append(parts, fmt.Sprintf("%d", n))
-	}
-	return strings.Join(parts, ",")
 }
 
 func extractUserIDFromClaims(claims any) uint {
@@ -96,77 +76,5 @@ func extractUserIDFromClaims(claims any) uint {
 	return 0
 }
 
-// recoverStuckPipeline requeues/clears work that was left mid-flight by a crash
-// or restart, so nothing is stranded in 'processing' forever (Q6). Runs once at
-// startup before the worker loop.
-func recoverStuckPipeline() {
-	if r := db.Model(&TTSQueueJob{}).Where("status = ?", "processing").Update("status", "queued"); r.Error == nil && r.RowsAffected > 0 {
-		log.Printf("♻️ recovered %d TTS job(s) stuck in 'processing' → 'queued'", r.RowsAffected)
-	}
-	if r := db.Model(&BookChunk{}).Where("tts_status = ?", "processing").Update("tts_status", "failed"); r.Error == nil && r.RowsAffected > 0 {
-		log.Printf("♻️ reset %d chunk(s) stuck in 'processing' → 'failed'", r.RowsAffected)
-	}
-	if r := db.Model(&Book{}).Where("status = ?", "transcribing").Update("status", "pending"); r.Error == nil && r.RowsAffected > 0 {
-		log.Printf("♻️ reset %d book(s) stuck in 'transcribing' → 'pending'", r.RowsAffected)
-	}
-}
-
-func startTTSWorker() {
-	once.Do(func() {
-		go func() {
-			// Clear anything stranded by a previous crash before we start.
-			recoverStuckPipeline()
-			for {
-				var job TTSQueueJob
-				res := db.
-					Where("status = ?", "queued").
-					Order("created_at, id").
-					First(&job)
-
-				// No work to do right now
-				if errors.Is(res.Error, gorm.ErrRecordNotFound) {
-					time.Sleep(5 * time.Second)
-					continue
-				}
-				// Something went wrong talking to the DB
-				if res.Error != nil {
-					log.Printf("❌ error fetching queued TTS job: %v", res.Error)
-					time.Sleep(10 * time.Second)
-					continue
-				}
-
-				// Atomically claim the job (guard against re-processing).
-				claim := db.Model(&TTSQueueJob{}).
-					Where("id = ? AND status = ?", job.ID, "queued").
-					Update("status", "processing")
-				if claim.Error != nil || claim.RowsAffected == 0 {
-					time.Sleep(2 * time.Second)
-					continue
-				}
-
-				// Do the work
-				if err := processMergedChunks(job.BookID); err != nil {
-					log.Printf("❌ processing job #%d failed: %v", job.ID, err)
-					db.Model(&job).Update("status", "failed")
-					continue
-				}
-
-				// Finally, mark complete
-				if err := db.Model(&job).Update("status", "complete").Error; err != nil {
-					log.Printf("❌ failed to mark job #%d complete: %v", job.ID, err)
-				}
-			}
-		}()
-	})
-}
-
-func parseChunkIDs(s string) []uint {
-	parts := strings.Split(s, ",")
-	var ids []uint
-	for _, p := range parts {
-		var v uint
-		fmt.Sscanf(p, "%d", &v)
-		ids = append(ids, v)
-	}
-	return ids
-}
+// (Durable job processing now lives in queue.go via asynq; the old
+// TTSQueueJob-polling worker and crash-recovery sweeper were removed.)
