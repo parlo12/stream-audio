@@ -19,6 +19,7 @@ const (
 	TypeTranscribeBatch = "transcribe:batch"
 	TypeMergeChunks     = "chunks:merge"
 	TypeFetchCover      = "cover:fetch"
+	TypeParseBook       = "book:parse"
 )
 
 const batchSizePages = 20
@@ -39,6 +40,10 @@ type TaskFetchCover struct {
 	BookID uint   `json:"book_id"`
 	Title  string `json:"title"`
 	Author string `json:"author"`
+}
+
+type TaskParseBook struct {
+	BookID uint `json:"book_id"`
 }
 
 // TranscriptionBatch tracks progress of one 20-page transcription batch.
@@ -82,9 +87,21 @@ func startAsyncWorker() error {
 	mux.HandleFunc(TypeTranscribeBatch, handleTranscribeBatch)
 	mux.HandleFunc(TypeMergeChunks, handleMergeChunks)
 	mux.HandleFunc(TypeFetchCover, handleFetchCover)
+	mux.HandleFunc(TypeParseBook, handleParseBook)
+
+	// Reconciliation sweeper: catch uploads that were initiated but whose
+	// client died before confirming (R2 has no bucket-event webhooks).
+	go reconcileUploadsLoop()
 
 	log.Printf("🛠️  asynq worker starting (concurrency=%d)", concurrency)
 	return srv.Run(mux)
+}
+
+func enqueueParseBook(bookID uint) error {
+	b, _ := json.Marshal(TaskParseBook{BookID: bookID})
+	_, err := qClient.Enqueue(asynq.NewTask(TypeParseBook, b),
+		asynq.MaxRetry(3), asynq.Timeout(15*time.Minute), asynq.Queue("default"))
+	return err
 }
 
 // ---- enqueue helpers ----
@@ -265,6 +282,67 @@ func handleFetchCover(ctx context.Context, t *asynq.Task) error {
 		PublishEvent(fmt.Sprintf("users/%d/cover_uploaded", book.UserID), payload)
 	}
 	return nil
+}
+
+// handleParseBook downloads the uploaded source from R2 (via ChunkDocumentBatch
+// → ExtractTextByType, which localizes the key), chunks it, and marks the book
+// ready for transcription.
+func handleParseBook(ctx context.Context, t *asynq.Task) error {
+	var p TaskParseBook
+	if err := json.Unmarshal(t.Payload(), &p); err != nil {
+		return fmt.Errorf("bad payload: %v: %w", err, asynq.SkipRetry)
+	}
+	var book Book
+	if err := db.First(&book, p.BookID).Error; err != nil {
+		return fmt.Errorf("book %d not found: %w", p.BookID, err)
+	}
+	resetBookContent(p.BookID) // idempotent: clear any prior chunks on re-parse
+	pages, err := ChunkDocumentBatch(p.BookID, book.FilePath)
+	if err != nil {
+		db.Model(&Book{}).Where("id = ?", p.BookID).Update("status", "chunking_failed")
+		return err
+	}
+	db.Model(&Book{}).Where("id = ?", p.BookID).Update("status", "pending")
+	log.Printf("📖 Parsed book %d into %d pages (ready for transcription)", p.BookID, pages)
+	return nil
+}
+
+// reconcileUploadsLoop periodically completes/expires uploads that were
+// initiated but never confirmed by the client (R2 has no event webhooks).
+func reconcileUploadsLoop() {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		reconcileStaleUploads()
+	}
+}
+
+func reconcileStaleUploads() {
+	cutoff := time.Now().Add(-15 * time.Minute)
+	var books []Book
+	if err := db.Where("status = ? AND updated_at < ?", "awaiting_upload", cutoff).Find(&books).Error; err != nil {
+		return
+	}
+	for _, b := range books {
+		if b.FilePath == "" {
+			continue
+		}
+		ok, err := store.Exists(context.Background(), b.FilePath)
+		if err != nil {
+			continue
+		}
+		if ok {
+			// Object arrived but the client never confirmed — finish it.
+			db.Model(&Book{}).Where("id = ?", b.ID).Update("status", "parsing")
+			if err := enqueueParseBook(b.ID); err != nil {
+				log.Printf("⚠️ reconcile: enqueue parse for book %d failed: %v", b.ID, err)
+			}
+			log.Printf("♻️ reconcile: completed orphaned upload for book %d", b.ID)
+		} else {
+			db.Model(&Book{}).Where("id = ?", b.ID).Update("status", "upload_expired")
+			log.Printf("♻️ reconcile: expired upload for book %d", b.ID)
+		}
+	}
 }
 
 // publishPagesReady emits an MQTT event telling the app how many pages are playable.

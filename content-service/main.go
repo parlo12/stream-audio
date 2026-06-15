@@ -215,6 +215,11 @@ func main() {
 		// adding a new route to pull one book by ID
 		authorized.GET("/books/:book_id", requireBookOwnership(), getSingleBookHandler)
 
+		// Presigned direct-to-R2 upload (Phase 3): client uploads the file
+		// straight to R2, server only mints the URL + parses on completion.
+		authorized.POST("/books/:book_id/upload/initiate", requireBookOwnership(), initiateUploadHandler)
+		authorized.POST("/books/:book_id/upload/complete", requireBookOwnership(), completeUploadHandler)
+
 		// adding a route to pull audio and backgrond music for a book
 		authorized.GET("/books/:book_id/pages/:page/audio", requireBookOwnership(), streamSinglePageAudioHandler)
 

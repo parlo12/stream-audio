@@ -33,9 +33,18 @@ func TestBatchSizeConstant(t *testing.T) {
 }
 
 func TestTaskTypeNames(t *testing.T) {
-	for _, ty := range []string{TypeTranscribeBatch, TypeMergeChunks, TypeFetchCover} {
+	for _, ty := range []string{TypeTranscribeBatch, TypeMergeChunks, TypeFetchCover, TypeParseBook} {
 		if ty == "" {
 			t.Fatal("empty task type constant")
 		}
+	}
+}
+
+func TestParseBookPayloadRoundTrip(t *testing.T) {
+	in := TaskParseBook{BookID: 99}
+	b, _ := json.Marshal(in)
+	var out TaskParseBook
+	if err := json.Unmarshal(b, &out); err != nil || out != in {
+		t.Fatalf("round-trip failed: %v %+v", err, out)
 	}
 }

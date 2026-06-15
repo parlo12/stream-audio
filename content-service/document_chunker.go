@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -190,6 +191,16 @@ func ChunkDocumentBatch(bookID uint, filePath string) (int, error) {
 }
 
 func ExtractTextByType(path string) (string, error) {
+	// If path is an R2 object key (not a local path), download it to a temp
+	// file first so the disk-based extractors below can read it.
+	if !isLegacyLocalPath(path) {
+		local, cleanup, err := localizeMedia(context.Background(), path)
+		if err != nil {
+			return "", fmt.Errorf("localize source %s: %w", path, err)
+		}
+		defer cleanup()
+		path = local
+	}
 	lowerPath := strings.ToLower(path)
 	switch {
 	case strings.HasSuffix(lowerPath, ".pdf"):

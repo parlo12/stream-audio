@@ -54,6 +54,7 @@ type MediaStore interface {
 	PutFile(ctx context.Context, key, localPath, contentType string) error
 	GetToFile(ctx context.Context, key, localPath string) error
 	PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error)
+	PresignPut(ctx context.Context, key string, ttl time.Duration, contentType string) (string, error)
 	Delete(ctx context.Context, key string) error
 	Exists(ctx context.Context, key string) (bool, error)
 	PublicURL(key string) string
@@ -138,6 +139,21 @@ func (s *r2Store) PresignGet(ctx context.Context, key string, ttl time.Duration)
 	req, err := s.presign.PresignGetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket), Key: aws.String(key),
 	}, s3.WithPresignExpires(ttl))
+	if err != nil {
+		return "", err
+	}
+	return req.URL, nil
+}
+
+// PresignPut returns a short-lived presigned PUT URL. Only Content-Type is
+// signed — the client MUST send exactly that Content-Type or R2 rejects the
+// PUT with SignatureDoesNotMatch. Objects stay private.
+func (s *r2Store) PresignPut(ctx context.Context, key string, ttl time.Duration, contentType string) (string, error) {
+	in := &s3.PutObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)}
+	if contentType != "" {
+		in.ContentType = aws.String(contentType)
+	}
+	req, err := s.presign.PresignPutObject(ctx, in, s3.WithPresignExpires(ttl))
 	if err != nil {
 		return "", err
 	}
