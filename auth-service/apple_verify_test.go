@@ -41,7 +41,7 @@ func signAppleToken(t *testing.T, method jwt.SigningMethod, signKey interface{},
 func validAppleClaims() *AppleTokenClaims {
 	return &AppleTokenClaims{
 		ISS:           "https://appleid.apple.com",
-		AUD:           "com.narrafied.audiobook", // matches APPLE_BUNDLE_ID default
+		AUD:           "com.rmhrealestate.AudioBook", // matches APPLE_BUNDLE_ID default
 		EXP:           time.Now().Add(time.Hour).Unix(),
 		SUB:           "001234.abcdef",
 		Email:         "victim@example.com",

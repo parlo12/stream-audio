@@ -2409,8 +2409,9 @@ func verifyAppleToken(identityToken string) (*AppleTokenClaims, error) {
 		return nil, errors.New("invalid issuer")
 	}
 
-	// Verify audience (should be your app's bundle ID)
-	expectedAudience := getEnv("APPLE_BUNDLE_ID", "com.narrafied.audiobook")
+	// Verify audience (should be your app's bundle ID). Defaults to the
+	// AudioBook iOS bundle ID; override via APPLE_BUNDLE_ID if it changes.
+	expectedAudience := getEnv("APPLE_BUNDLE_ID", "com.rmhrealestate.AudioBook")
 	if claims.AUD != expectedAudience {
 		return nil, fmt.Errorf("invalid audience: expected %s, got %s", expectedAudience, claims.AUD)
 	}
