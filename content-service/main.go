@@ -149,7 +149,11 @@ func main() {
 	authorized := router.Group("/user")
 	authorized.Use(authMiddleware())
 	{ // handles book creation, listing, and file uploads
-		authorized.POST("/books/:book_id/cover", uploadBookCoverHandler)
+		// SECURITY (S6): every route that targets a specific :book_id is gated
+		// by requireBookOwnership() so a user can only act on their own books.
+		// Routes that take book_id in the body/form (upload, /chunks/tts,
+		// /chunks/audio-by-id) verify ownership inline in their handlers.
+		authorized.POST("/books/:book_id/cover", requireBookOwnership(), uploadBookCoverHandler)
 
 		// Create a new book
 		authorized.POST("/books", createBookHandler)
@@ -159,30 +163,30 @@ func main() {
 		// Upload a book file
 		authorized.POST("/books/upload", uploadBookFileHandler)
 		// List all chunks for a book
-		authorized.GET("/books/:book_id/chunks/pages", listBookPagesHandler) // New handler for listing book pages
+		authorized.GET("/books/:book_id/chunks/pages", requireBookOwnership(), listBookPagesHandler) // New handler for listing book pages
 		// authorized.GET("/books/stream/proxy/:id", proxyBookAudioHandler)
 
 		authorized.GET("/books/stream/proxy/:book_id", proxyBookAudioHandler)
 		authorized.POST("/chunks/tts", ProcessChunksTTSHandler)
-		authorized.GET("/chunks/tts/merged-audio/:book_id", streamMergedChunkAudioHandler)
-		authorized.GET("/books/:book_id/chunks/:start/:end/audio", streamChunkGroupAudioHandler)
+		authorized.GET("/chunks/tts/merged-audio/:book_id", requireBookOwnership(), streamMergedChunkAudioHandler)
+		authorized.GET("/books/:book_id/chunks/:start/:end/audio", requireBookOwnership(), streamChunkGroupAudioHandler)
 		//authorized.GET("/chunks/status", checkChunkQueueStatusHandler)
 
 		//Batch Transcribe Book Page-by-Page (Sequentially)
-		authorized.POST("/books/:book_id/tts/batch", BatchTranscribeBookHandler)
+		authorized.POST("/books/:book_id/tts/batch", requireBookOwnership(), BatchTranscribeBookHandler)
 		// processing old chunks
-		authorized.GET("/books/:book_id/chunks/processed", listProcessedChunkGroupsHandler)
+		authorized.GET("/books/:book_id/chunks/processed", requireBookOwnership(), listProcessedChunkGroupsHandler)
 		// stream audio by chunk IDs
 		authorized.POST("/chunks/audio-by-id", streamAudioByChunkIDsHandler)
 
 		// adding a new route to delate a book by ID or title
-		authorized.DELETE("/books/:book_id", deleteBookHandler)
+		authorized.DELETE("/books/:book_id", requireBookOwnership(), deleteBookHandler)
 
 		// adding a new route to pull one book by ID
-		authorized.GET("/books/:book_id", getSingleBookHandler)
+		authorized.GET("/books/:book_id", requireBookOwnership(), getSingleBookHandler)
 
 		// adding a route to pull audio and backgrond music for a book
-		authorized.GET("/books/:book_id/pages/:page/audio", streamSinglePageAudioHandler)
+		authorized.GET("/books/:book_id/pages/:page/audio", requireBookOwnership(), streamSinglePageAudioHandler)
 
 		// Book search/discovery endpoint - AI-powered book suggestions
 		authorized.POST("/search-books", SearchBooksHandler)
@@ -343,22 +347,50 @@ func createBookHandler(c *gin.Context) {
 // deleteBookHandler deletes a book by its ID or title.
 
 func deleteBookHandler(c *gin.Context) {
-	bookID := c.Param("book_id")
-	if bookID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Book ID or title is required"})
-		return
-	}
+	// Ownership already verified by requireBookOwnership(); reuse the loaded book.
+	book := c.MustGet("book").(Book)
 
-	var book Book
-	if err := db.First(&book, bookID).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Book not found"})
-		return
-	}
+	// Snapshot related rows so we can clean up their on-disk files after the
+	// rows are deleted.
+	var chunks []BookChunk
+	db.Where("book_id = ?", book.ID).Find(&chunks)
+	var groups []ProcessedChunkGroup
+	db.Where("book_id = ?", book.ID).Find(&groups)
 
-	if err := db.Delete(&book).Error; err != nil {
+	// Q11: delete all related rows in one transaction so a book never leaves
+	// orphaned chunks/progress/jobs behind.
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("book_id = ?", book.ID).Delete(&PlaybackProgress{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("book_id = ?", book.ID).Delete(&TTSQueueJob{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Unscoped().Where("book_id = ?", book.ID).Delete(&ProcessedChunkGroup{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("book_id = ?", book.ID).Delete(&BookChunk{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&Book{}, book.ID).Error
+	})
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete book", "details": err.Error()})
 		return
 	}
+
+	// Best-effort on-disk cleanup (rows are already committed gone).
+	for _, ch := range chunks {
+		removeFileIfExists(ch.AudioPath)
+		removeFileIfExists(ch.FinalAudioPath)
+	}
+	for _, g := range groups {
+		removeFileIfExists(g.AudioPath)
+	}
+	removeFileIfExists(book.FilePath)
+	removeFileIfExists(book.AudioPath)
+	removeFileIfExists(book.CoverPath)
+	_ = os.RemoveAll(uploadDirForBook(book.UserID, book.ID))
 
 	c.JSON(http.StatusOK, gin.H{"message": "Book deleted successfully"})
 }

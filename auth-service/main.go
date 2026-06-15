@@ -1777,15 +1777,18 @@ func deleteUserDataHandler(c *gin.Context) {
 		return
 	}
 
-	// Delete user_book_histories
-	if err := tx.Where("user_id = ?", userID).Delete(&UserBookHistory{}).Error; err != nil {
+	// Delete user_book_histories (B2: keyed by user_history_id, not a
+	// non-existent user_id column — delete children before the parent rows).
+	if err := tx.Where("user_history_id IN (?)",
+		tx.Model(&UserHistory{}).Select("id").Where("original_user_id = ?", userID)).
+		Delete(&UserBookHistory{}).Error; err != nil {
 		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user book histories"})
 		return
 	}
 
-	// Delete user_histories
-	if err := tx.Where("user_id = ?", userID).Delete(&UserHistory{}).Error; err != nil {
+	// Delete user_histories (B2: keyed by original_user_id, not user_id).
+	if err := tx.Where("original_user_id = ?", userID).Delete(&UserHistory{}).Error; err != nil {
 		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user histories"})
 		return
@@ -1866,11 +1869,14 @@ func deleteUserCompleteHandler(c *gin.Context) {
 		return
 	}
 
-	// Delete user_book_histories
-	tx.Where("user_id = ?", userID).Delete(&UserBookHistory{})
+	// Delete user_book_histories (B2: keyed by user_history_id, not a
+	// non-existent user_id column — delete children before the parent rows).
+	tx.Where("user_history_id IN (?)",
+		tx.Model(&UserHistory{}).Select("id").Where("original_user_id = ?", userID)).
+		Delete(&UserBookHistory{})
 
-	// Delete user_histories
-	tx.Where("user_id = ?", userID).Delete(&UserHistory{})
+	// Delete user_histories (B2: keyed by original_user_id, not user_id).
+	tx.Where("original_user_id = ?", userID).Delete(&UserHistory{})
 
 	// Delete the user
 	if err := tx.Delete(&user).Error; err != nil {

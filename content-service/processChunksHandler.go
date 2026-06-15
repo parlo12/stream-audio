@@ -48,6 +48,13 @@ func ProcessChunksTTSHandler(c *gin.Context) {
 		return
 	}
 
+	// SECURITY (S6): the book must belong to the caller. 404 (not 403) so we
+	// don't reveal that another user's book exists.
+	if _, err := verifyBookOwnership(req.BookID, getUserIDFromContext(c)); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Book not found"})
+		return
+	}
+
 	// Convert pages (index + 1) to chunk indices for the specific book
 	var chunks []BookChunk
 	if err := db.Where("book_id = ? AND index IN ?", req.BookID, toZeroBasedIndexes(req.Pages)).

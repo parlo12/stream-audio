@@ -34,6 +34,13 @@ func streamAudioByChunkIDsHandler(c *gin.Context) {
 	claims, _ := c.Get("claims")
 	userID := extractUserIDFromClaims(claims)
 
+	// SECURITY (S6): the book must belong to the caller. The chunk query below
+	// is already scoped to book_id, so verifying book ownership closes the IDOR.
+	if _, err := verifyBookOwnership(req.BookID, userID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Book not found"})
+		return
+	}
+
 	var chunks []BookChunk
 	if err := db.Where("id IN ? AND book_id = ?", req.ChunkIDs, req.BookID).Find(&chunks).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch chunks", "details": err.Error()})

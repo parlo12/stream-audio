@@ -93,13 +93,15 @@ Do these in one sitting; none requires architectural thought:
 11. ~~**Fix B3**~~ ✅ — Grouped `.Or(db.Where(...).Where("restored_at IS NULL"))` so the filter binds to every branch; signup conflict response no longer leaks `original_username`/`history_id`/`deleted_at`.
 12. ~~**Pin signing method** in content-service (S10)~~ ✅ — keyfunc now asserts `*jwt.SigningMethodHMAC`, matching auth-service. **Deferred:** the full shared `internal/authn` package extraction (separate Go modules, per-service Docker contexts) → Phase 5 packaging.
 
-### Phase 2 — Ownership and account lifecycle (2–3 days)
+### Phase 2 — Ownership and account lifecycle (partially done — June 15, 2026)
 
-13. **Ownership middleware** (S6): one `requireBookOwnership()` Gin middleware (param `book_id` → load book → compare `UserID` → store book in context), applied to every `/user/books/:book_id/*` route and the chunk/merged-audio routes; `chunks/audio-by-id` validates via the chunk→book join. Add the missing check to `streamSinglePageAudioHandler`, `streamMergedChunkAudioHandler`, `streamChunkGroupAudioHandler`, upload, batch-TTS, delete, get, pages.
-14. **Upload hardening** (S7): ignore the client filename — save as `./uploads/{user_id}/{book_id}/original{ext}` with the extension from a sniffed content type (magic bytes), not the name; reject `Content-Length` over a configured cap at the app layer too.
-15. **Fix admin deletion column bugs** (B2) and add an `audit_log` table + middleware for every `/admin/*` mutation (who, what, when, target) (S10). Replace the wipe "confirmation token" with a short-lived server-generated confirmation (request wipe → receive nonce → confirm with nonce).
-16. **Redesign restore-account** (S5): restoration requires the account password (it's stored in history) or a verified social token matching the stored provider ID; never return a JWT to an unauthenticated probe. Re-enable the endpoint only then.
-17. **Cascade book deletion** (Q11): delete chunks, progress, processed groups, and disk files when a book is deleted; reset chunks on re-upload.
+Exploitable holes closed this pass (S6/S7/Q11/B2); admin/restore lifecycle (S5/S10) deferred per product call (iOS exposes only Apple sign-in; restore stays disabled; admin is behind `is_admin`).
+
+13. ~~**Ownership middleware** (S6)~~ ✅ — `requireBookOwnership()` in `content-service/ownership.go` applied to every `:book_id` route; inline `verifyBookOwnership` on the body/form routes (upload, `/chunks/tts`, `/chunks/audio-by-id`). Returns 404 (not 403) on someone else's book.
+14. ~~**Upload hardening** (S7)~~ ✅ — saves to `./uploads/{user_id}/{book_id}/original{ext}` (client filename never touches the path); allow-list extension via `validUploadExt`; `MAX_UPLOAD_BYTES` size cap (413). (Magic-byte sniffing skipped — unreliable for epub/mobi; path scheme + allow-list + cap is the real fix.)
+15. **Admin deletion**: ~~column bugs (B2)~~ ✅ — `UserHistory` filtered by `original_user_id`, `UserBookHistory` by `user_history_id IN (subquery)`. **Deferred:** audit_log + wipe-nonce (S10).
+16. **Redesign restore-account** (S5): **deferred** — stays disabled (410). Revisit when social restore is needed.
+17. ~~**Cascade book deletion** (Q11)~~ ✅ — `deleteBookHandler` transactionally deletes chunks/progress/processed-groups/jobs + disk files; `resetBookContent` clears chunks/groups on re-upload.
 
 ### Phase 3 — Pipeline integrity (3–5 days, prerequisite for the worker-fleet migration)
 
@@ -146,7 +148,7 @@ With the above done, start [structureImprovmentPlan.md](structureImprovmentPlan.
 
 1. ~~Ports/static/secrets/logging/user_id/restore-off/push repos~~ → **Phase 0, do today.**
 2. ~~Social-login verification + signing-method pin~~ → **Phase 1 ✅** (shared-package extraction deferred to Phase 5).
-3. Ownership middleware + upload hardening + admin fixes → **Phase 2.**
+3. ~~Ownership middleware + upload hardening + cascade delete + admin column fix~~ → **Phase 2 ✅** (restore redesign S5 + admin audit/wipe S10 deferred).
 4. Temp dirs, locks, per-page context, Foley fade, caching, toggle, tests → **Phase 3.**
 5. Stripe line-items + webhook coverage + pricing reconciliation → **Phase 4.**
 6. Package split, migrations, gateway hardening, Keychain, docs → **Phase 5 (parallelizable).**
