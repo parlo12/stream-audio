@@ -396,17 +396,17 @@ func deleteBookHandler(c *gin.Context) {
 		return
 	}
 
-	// Best-effort on-disk cleanup (rows are already committed gone).
+	// Best-effort media cleanup (R2 objects or legacy local files).
 	for _, ch := range chunks {
-		removeFileIfExists(ch.AudioPath)
-		removeFileIfExists(ch.FinalAudioPath)
+		deleteStored(ch.AudioPath)
+		deleteStored(ch.FinalAudioPath)
 	}
 	for _, g := range groups {
-		removeFileIfExists(g.AudioPath)
+		deleteStored(g.AudioPath)
 	}
-	removeFileIfExists(book.FilePath)
-	removeFileIfExists(book.AudioPath)
-	removeFileIfExists(book.CoverPath)
+	deleteStored(book.FilePath)
+	deleteStored(book.AudioPath)
+	deleteStored(book.CoverPath)
 	_ = os.RemoveAll(uploadDirForBook(book.UserID, book.ID))
 
 	c.JSON(http.StatusOK, gin.H{"message": "Book deleted successfully"})

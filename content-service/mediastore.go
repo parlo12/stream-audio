@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -219,6 +220,21 @@ func contentTypeForExt(p string) string {
 		return "application/epub+zip"
 	default:
 		return "application/octet-stream"
+	}
+}
+
+// deleteStored removes a stored media reference: the R2 object for an object
+// key, or the local file for a legacy on-disk path. Best-effort (logs only).
+func deleteStored(path string) {
+	if path == "" {
+		return
+	}
+	if isLegacyLocalPath(path) {
+		removeFileIfExists(path)
+		return
+	}
+	if err := store.Delete(context.Background(), path); err != nil {
+		log.Printf("⚠️ could not delete R2 object %s: %v", path, err)
 	}
 }
 

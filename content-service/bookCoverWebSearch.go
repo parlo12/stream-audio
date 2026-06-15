@@ -6,6 +6,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,9 +15,21 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
+
+// storeCover uploads a freshly-downloaded local cover to R2 and returns the
+// object key + its public URL (covers are public for discovery).
+func storeCover(localPath, bookID string) (key string, publicURL string, err error) {
+	bidU, _ := strconv.ParseUint(bookID, 10, 64)
+	key = coverKey(uint(bidU), filepath.Base(localPath), filepath.Ext(localPath))
+	if _, err = uploadArtifact(context.Background(), localPath, key); err != nil {
+		return "", "", err
+	}
+	return key, store.PublicURL(key), nil
+}
 
 // OpenAI Responses API structures
 type ResponsesRequest struct {
@@ -499,13 +512,14 @@ func fetchAndSaveBookCover(title, author, bookID string) (localPath string, publ
 		// Try to download the found image
 		localPath, downloadErr = downloadAndSaveImage(imageURL, bookID)
 		if downloadErr == nil {
-			// Success!
-			host := getEnv("STREAM_HOST", "https://narrafied.com")
-			filename := filepath.Base(localPath)
-			publicURL = fmt.Sprintf("%s/covers/%s", host, filename)
-			return localPath, publicURL, nil
+			// Upload to R2; return the object key + public URL.
+			if key, url, serr := storeCover(localPath, bookID); serr == nil {
+				return key, url, nil
+			} else {
+				downloadErr = serr
+			}
 		}
-		log.Printf("⚠️ Failed to download from OpenAI result: %v, trying Open Library fallback...", downloadErr)
+		log.Printf("⚠️ Failed to fetch/store from OpenAI result: %v, trying Open Library fallback...", downloadErr)
 	} else {
 		log.Printf("⚠️ OpenAI search failed: %v, trying Open Library fallback...", err)
 	}
@@ -515,12 +529,13 @@ func fetchAndSaveBookCover(title, author, bookID string) (localPath string, publ
 	if imageURL != "" {
 		localPath, downloadErr = downloadAndSaveImage(imageURL, bookID)
 		if downloadErr == nil {
-			host := getEnv("STREAM_HOST", "https://narrafied.com")
-			filename := filepath.Base(localPath)
-			publicURL = fmt.Sprintf("%s/covers/%s", host, filename)
-			return localPath, publicURL, nil
+			if key, url, serr := storeCover(localPath, bookID); serr == nil {
+				return key, url, nil
+			} else {
+				downloadErr = serr
+			}
 		}
-		log.Printf("⚠️ Failed to download from Open Library: %v", downloadErr)
+		log.Printf("⚠️ Failed to fetch/store from Open Library: %v", downloadErr)
 	}
 
 	// Both methods failed

@@ -238,13 +238,13 @@ func resetBookContent(bookID uint) {
 	var chunks []BookChunk
 	db.Where("book_id = ?", bookID).Find(&chunks)
 	for _, ch := range chunks {
-		removeFileIfExists(ch.AudioPath)
-		removeFileIfExists(ch.FinalAudioPath)
+		deleteStored(ch.AudioPath)
+		deleteStored(ch.FinalAudioPath)
 	}
 	var groups []ProcessedChunkGroup
 	db.Where("book_id = ?", bookID).Find(&groups)
 	for _, g := range groups {
-		removeFileIfExists(g.AudioPath)
+		deleteStored(g.AudioPath)
 	}
 	db.Unscoped().Where("book_id = ?", bookID).Delete(&BookChunk{})
 	db.Unscoped().Where("book_id = ?", bookID).Delete(&ProcessedChunkGroup{})
