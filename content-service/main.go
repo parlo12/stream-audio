@@ -252,6 +252,11 @@ func setupDatabase() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
+	if sqlDB, derr := db.DB(); derr == nil {
+		sqlDB.SetMaxOpenConns(envInt("DB_MAX_OPEN", 20))
+		sqlDB.SetMaxIdleConns(envInt("DB_MAX_IDLE", 5))
+		sqlDB.SetConnMaxLifetime(30 * time.Minute)
+	}
 
 	log.Printf("Connected to database host=%s dbname=%s sslmode=%s", dbHost, dbName, sslMode)
 
@@ -693,11 +698,17 @@ func BatchTranscribeBookHandler(c *gin.Context) {
 		return
 	}
 
-	accountType, err := getUserAccountType(token)
-	if err != nil {
-		log.Printf("Error checking account type: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify account type"})
-		return
+	// Prefer the account_type carried in the JWT (no network hop). Fall back to
+	// the auth-service HTTP lookup only for older tokens that lack the claim.
+	accountType := accountTypeFromClaims(c)
+	if accountType == "" {
+		at, err := getUserAccountType(token)
+		if err != nil {
+			log.Printf("Error checking account type: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify account type"})
+			return
+		}
+		accountType = at
 	}
 
 	freeLimit := freeTierPageLimit()
@@ -821,6 +832,21 @@ func BatchTranscribeBookHandler(c *gin.Context) {
 	}()
 
 	c.JSON(http.StatusAccepted, gin.H{"message": "Batch transcription started in background"})
+}
+
+// accountTypeFromClaims returns the account_type embedded in the JWT, or "" if
+// the token predates that claim (issued before Phase 5 deploy).
+func accountTypeFromClaims(c *gin.Context) string {
+	claims, exists := c.Get("claims")
+	if !exists {
+		return ""
+	}
+	mc, ok := claims.(jwt.MapClaims)
+	if !ok {
+		return ""
+	}
+	at, _ := mc["account_type"].(string)
+	return at
 }
 
 func getUserIDFromContext(c *gin.Context) uint {
@@ -1001,6 +1027,16 @@ func getEnv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// envInt reads an integer env var or returns def.
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
 }
 
 // deleteFileContentHandler deletes a single file from the server

@@ -122,14 +122,18 @@ Exploitable holes closed this pass (S6/S7/Q11/B2); admin/restore lifecycle (S5/S
 29. ~~**Double price line-item** (B7)~~ ✅ — checkout now bills a single subscription price from `STRIPE_PRICE_ID` (no hardcoded IDs); session carries `user_id` metadata. **Deploy/coord note:** point `STRIPE_PRICE_ID` at the intended price and reconcile $15 vs $24.99 across `PricingConfiguration.swift`, Stripe, and App Store Connect.
 30. **Webhook coverage** (B8): ~~`invoice.payment_failed` (grace, no downgrade), `customer.subscription.updated` (status-driven tier), idempotency via `processed_stripe_events`~~ ✅. **Deferred:** daily Stripe→DB reconcile sweep + reconcile-on-restore (restore is disabled / S5; revisit with Phase 5 quotas).
 
-### Phase 5 — Hygiene that keeps it fixed (parallel/ongoing)
+### Phase 5 — Hygiene (backend slice done — June 15, 2026; rest deferred)
 
-31. **Split the monoliths** into packages (`handlers/`, `models/`, `store/`, `clients/`) while files are already being touched; delete dead code (character_detection.go, .pack, backups, debug blocks) and add `*.backup` to .gitignore.
-32. **Versioned migrations** (golang-migrate/Atlas) replacing AutoMigrate before any schema work from the architecture plan.
-33. **Gateway/nginx hardening**: per-IP rate limit on `/login`, `/signup`, `/auth/*`; proxy timeouts; body-size caps; request-ID middleware propagated via header and included in structured logs (swap emoji-printf for slog with fields).
-34. **DB client hygiene**: pool sizing, statement timeout, `context.Context` on hot queries; replace the per-request account-type HTTP call with the JWT claim (add `account_type` to claims at issue time) or a short Redis cache.
-35. **iOS**: move the token to Keychain (one small `TokenStore` used by the 5 call sites); switch uploads to a background `URLSession` until presigned uploads land; commit in small batches with a `.gitignore` for build artifacts.
-36. **Docs**: regenerate claude.md from current reality (the NARRAFIED_PROJECT_OVERVIEW.md can seed it); delete duplicated/stale guides or replace with pointers to a single source of truth.
+Backend-deployable slice shipped this pass; the monolith split, versioned migrations, iOS, and docs are separate efforts.
+
+31. **Split the monoliths** — **deferred** (separate refactor). ~~Dead code removed~~ ✅: deleted `character_detection.go`, `*.backup`, `tts_elevenlab.go.pack`, `story.txt`, the fileupload page-11 debug block; rewrote `content-service/README.md`; `.gitignore` already covers `*.backup`.
+32. **Versioned migrations** — **deferred** (golang-migrate; risky on the live external DB — do before the architecture migration).
+33. ~~**Gateway hardening** (33)~~ ✅ — per-IP rate limit (`golang.org/x/time/rate`) on `/login`/`/signup`/`/auth/*`, `MAX_PROXY_BODY_BYTES` body cap, proxy + server timeouts, request-ID middleware (`X-Request-ID`) + JSON `slog` request logs.
+34. ~~**DB client hygiene + account_type-in-claims** (34)~~ ✅ — connection pool sizing (`DB_MAX_OPEN`/`DB_MAX_IDLE`/30m lifetime) on both services; `account_type` now in JWT claims, content-service reads it from the claim with an HTTP fallback for pre-deploy tokens. (Statement-timeout/`context` on hot queries still TODO.)
+35. **iOS** (Keychain token + background uploads) — **deferred** (separate Swift pass; 32 call sites mapped).
+36. **Docs** regen/dedupe — **deferred** (separate pass).
+
+Also done this pass (deferred from Phase 2): **S10** ✅ — admin `audit_logs` table + `auditMiddleware` on every `/admin` mutation; `/admin/system/wipe` now requires a short-lived single-use server nonce (`POST /admin/system/wipe/request`) instead of a hardcoded string. **S5** remains disabled (410) by decision.
 
 ### Phase 6 — Hand off to the architecture migration
 
@@ -151,5 +155,5 @@ With the above done, start [structureImprovmentPlan.md](structureImprovmentPlan.
 3. ~~Ownership middleware + upload hardening + cascade delete + admin column fix~~ → **Phase 2 ✅** (restore redesign S5 + admin audit/wipe S10 deferred).
 4. ~~Temp dirs, locks, per-page context, Foley fade, caching, tests~~ → **Phase 3 ✅** (multi-voice toggle Q4 left always-on per product decision).
 5. ~~Stripe single price + webhook coverage + idempotency~~ → **Phase 4 ✅** (pricing reconciliation = deploy note; daily reconcile sweep deferred).
-6. Package split, migrations, gateway hardening, Keychain, docs → **Phase 5 (parallelizable).**
+6. ~~Gateway hardening + DB pool + account_type-in-claims + S10 admin audit/wipe-nonce + dead-code~~ → **Phase 5 backend slice ✅** (monolith split, versioned migrations, iOS Keychain, docs still deferred).
 7. Begin the storage/queue/presigned/quota migration → **Phase 6 / other doc.**

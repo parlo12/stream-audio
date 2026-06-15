@@ -8,8 +8,6 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -19,7 +17,6 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"gorm.io/gorm"
 )
 
 
@@ -176,17 +173,6 @@ func uploadBookFileHandler(c *gin.Context) {
 		"page_indices": len(actualChunks),
 		"async":        false,
 	})
-
-	// 🔍 Debugging: Check if page 11 (index 10) exists
-	var missingChunk BookChunk
-	err = db.Where("book_id = ? AND index = ?", book.ID, 10).First(&missingChunk).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		fmt.Println("⚠️ Page 11 (index 10) is missing for book", book.ID)
-	} else if err != nil {
-		fmt.Println("❌ Error querying page 11:", err)
-	} else {
-		fmt.Println("✅ Page 11 exists:", missingChunk.AudioPath)
-	}
 }
 
 // uploadBaseDir is the root under which all uploaded documents are stored.

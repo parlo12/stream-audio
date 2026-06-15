@@ -1,8 +1,10 @@
 package main
 
 import (
+	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -323,9 +325,9 @@ func main() {
 		authorized.POST("/delete", deleteAccountHandler)
 	}
 
-	// Admin routes group
+	// Admin routes group. auditMiddleware records every mutating call (S10).
 	admin := router.Group("/admin")
-	admin.Use(authMiddleware(), adminMiddleware())
+	admin.Use(authMiddleware(), adminMiddleware(), auditMiddleware())
 	{
 		admin.GET("/stats", getAdminStatsHandler)
 		admin.GET("/users", listUsersHandler)
@@ -338,7 +340,9 @@ func main() {
 		// Individual file delete endpoint
 		admin.DELETE("/files", deleteFileHandler)
 
-		// Maintenance endpoints
+		// Maintenance endpoints. The destructive wipe is a two-step flow:
+		// request a short-lived nonce, then confirm with it (S10).
+		admin.POST("/system/wipe/request", requestWipeNonceHandler)
 		admin.POST("/system/wipe", wipeSystemHandler)
 		admin.DELETE("/users/:user_id/files", deleteUserFilesHandler)
 		admin.DELETE("/users/:user_id/data", deleteUserDataHandler)
@@ -369,6 +373,122 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
+// envInt reads an integer env var or returns def.
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+// configureConnPool bounds the DB connection pool so the service can't exhaust
+// the database's connection slots under load.
+func configureConnPool(g *gorm.DB) {
+	sqlDB, err := g.DB()
+	if err != nil {
+		log.Printf("⚠️ could not configure connection pool: %v", err)
+		return
+	}
+	sqlDB.SetMaxOpenConns(envInt("DB_MAX_OPEN", 20))
+	sqlDB.SetMaxIdleConns(envInt("DB_MAX_IDLE", 5))
+	sqlDB.SetConnMaxLifetime(30 * time.Minute)
+}
+
+// AuditLog records every admin mutation (who/what/when/target) for S10.
+type AuditLog struct {
+	ID          uint `gorm:"primaryKey"`
+	AdminUserID uint `gorm:"index"`
+	Method      string
+	Path        string
+	Target      string
+	StatusCode  int
+	CreatedAt   time.Time
+}
+
+// ---- S10: admin auditability ----
+
+// wipeNonceStore holds short-lived, single-use confirmation tokens for the
+// destructive system wipe (replaces the old hardcoded source string).
+var wipeNonceStore = struct {
+	sync.Mutex
+	nonces map[string]time.Time // nonce -> expiry
+}{nonces: map[string]time.Time{}}
+
+const wipeNonceTTL = 5 * time.Minute
+
+// requestWipeNonceHandler issues a fresh nonce that POST /admin/system/wipe must
+// echo back within wipeNonceTTL.
+func requestWipeNonceHandler(c *gin.Context) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not generate nonce"})
+		return
+	}
+	nonce := hex.EncodeToString(b)
+
+	wipeNonceStore.Lock()
+	// Opportunistically drop expired entries.
+	now := time.Now()
+	for n, exp := range wipeNonceStore.nonces {
+		if now.After(exp) {
+			delete(wipeNonceStore.nonces, n)
+		}
+	}
+	wipeNonceStore.nonces[nonce] = now.Add(wipeNonceTTL)
+	wipeNonceStore.Unlock()
+
+	c.JSON(http.StatusOK, gin.H{
+		"confirmation_token": nonce,
+		"expires_in_seconds": int(wipeNonceTTL.Seconds()),
+		"message":            "POST this token as confirmation_token to /admin/system/wipe within the window.",
+	})
+}
+
+// consumeWipeNonce validates and single-use-consumes a wipe nonce.
+func consumeWipeNonce(nonce string) bool {
+	wipeNonceStore.Lock()
+	defer wipeNonceStore.Unlock()
+	exp, ok := wipeNonceStore.nonces[nonce]
+	if !ok {
+		return false
+	}
+	delete(wipeNonceStore.nonces, nonce)
+	return time.Now().Before(exp)
+}
+
+// auditMiddleware records mutating admin requests (POST/DELETE) to audit_logs
+// after the handler runs, capturing who, what, the target param, and status.
+func auditMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Next()
+
+		if c.Request.Method != http.MethodPost && c.Request.Method != http.MethodDelete {
+			return
+		}
+		var adminID uint
+		if claims, ok := c.Get("claims"); ok {
+			if mc, ok := claims.(jwt.MapClaims); ok {
+				if f, ok := mc["user_id"].(float64); ok {
+					adminID = uint(f)
+				}
+			}
+		}
+		entry := AuditLog{
+			AdminUserID: adminID,
+			Method:      c.Request.Method,
+			Path:        c.FullPath(),
+			Target:      c.Param("user_id"),
+			StatusCode:  c.Writer.Status(),
+			CreatedAt:   time.Now(),
+		}
+		if err := db.Create(&entry).Error; err != nil {
+			log.Printf("⚠️ failed to write audit log: %v", err)
+		}
+	}
+}
+
 func setupDatabase() {
 	// Read from env, or default to sensible values
 	dbHost := getEnv("DB_HOST", "localhost")
@@ -391,9 +511,10 @@ func setupDatabase() {
 	if err != nil {
 		log.Fatalf("Could not connect to the database: %v", err)
 	}
+	configureConnPool(db)
 
 	// Run migrations
-	if err := db.AutoMigrate(&User{}, &UserHistory{}, &UserBookHistory{}, &ProcessedStripeEvent{}); err != nil {
+	if err := db.AutoMigrate(&User{}, &UserHistory{}, &UserBookHistory{}, &ProcessedStripeEvent{}, &AuditLog{}); err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
 	}
 
@@ -534,11 +655,12 @@ func loginHandler(c *gin.Context) {
 
 	// Create JWT token with user claims
 	claims := jwt.MapClaims{
-		"username": user.Username,
-		"user_id":  user.ID,
-		"is_admin": user.IsAdmin,
-		"exp":      time.Now().Add(time.Hour * 72).Unix(),
-		"iat":      time.Now().Unix(),
+		"username":     user.Username,
+		"user_id":      user.ID,
+		"is_admin":     user.IsAdmin,
+		"account_type": user.AccountType,
+		"exp":          time.Now().Add(time.Hour * 72).Unix(),
+		"iat":          time.Now().Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	tokenString, err := token.SignedString(jwtSecretKey)
@@ -1648,9 +1770,10 @@ func wipeSystemHandler(c *gin.Context) {
 		return
 	}
 
-	// Safety check: require exact confirmation token
-	if req.ConfirmationToken != "WIPE_ALL_USER_DATA_CONFIRM" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Invalid confirmation token. This operation requires explicit confirmation."})
+	// S10: require a fresh, single-use server-issued nonce (from
+	// POST /admin/system/wipe/request) instead of a hardcoded source string.
+	if !consumeWipeNonce(req.ConfirmationToken) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Invalid or expired confirmation token. Request one via POST /admin/system/wipe/request."})
 		return
 	}
 
@@ -2796,11 +2919,12 @@ func generateUniqueUsername(firstName, lastName, email string) string {
 // generateJWTToken creates a JWT token for a user
 func generateJWTToken(user *User) (string, error) {
 	claims := jwt.MapClaims{
-		"username": user.Username,
-		"user_id":  user.ID,
-		"is_admin": user.IsAdmin,
-		"exp":      time.Now().Add(72 * time.Hour).Unix(), // 72 hours expiry
-		"iat":      time.Now().Unix(),
+		"username":     user.Username,
+		"user_id":      user.ID,
+		"is_admin":     user.IsAdmin,
+		"account_type": user.AccountType, // lets content-service skip an HTTP hop
+		"exp":          time.Now().Add(72 * time.Hour).Unix(), // 72 hours expiry
+		"iat":          time.Now().Unix(),
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
