@@ -57,6 +57,7 @@ const (
 	TypeMergeChunks     = "chunks:merge"
 	TypeFetchCover      = "cover:fetch"
 	TypeParseBook       = "book:parse"
+	TypeHLSPackage      = "hls:package"
 )
 
 const batchSizePages = 20
@@ -81,6 +82,11 @@ type TaskFetchCover struct {
 
 type TaskParseBook struct {
 	BookID uint `json:"book_id"`
+}
+
+type TaskHLSPackage struct {
+	BookID    uint `json:"book_id"`
+	PageIndex int  `json:"page_index"`
 }
 
 // TranscriptionBatch tracks progress of one 20-page transcription batch.
@@ -125,6 +131,7 @@ func startAsyncWorker() error {
 	mux.HandleFunc(TypeMergeChunks, handleMergeChunks)
 	mux.HandleFunc(TypeFetchCover, handleFetchCover)
 	mux.HandleFunc(TypeParseBook, handleParseBook)
+	mux.HandleFunc(TypeHLSPackage, handleHLSPackage)
 
 	// Reconciliation sweeper: catch uploads that were initiated but whose
 	// client died before confirming (R2 has no bucket-event webhooks).
@@ -154,6 +161,13 @@ func enqueueMergeChunks(bookID uint) error {
 	b, _ := json.Marshal(TaskMergeChunks{BookID: bookID})
 	_, err := qClient.Enqueue(asynq.NewTask(TypeMergeChunks, b),
 		asynq.MaxRetry(5), asynq.Timeout(30*time.Minute), asynq.Queue("default"))
+	return err
+}
+
+func enqueueHLSPackage(bookID uint, pageIndex int) error {
+	b, _ := json.Marshal(TaskHLSPackage{BookID: bookID, PageIndex: pageIndex})
+	_, err := qClient.Enqueue(asynq.NewTask(TypeHLSPackage, b),
+		asynq.MaxRetry(3), asynq.Timeout(10*time.Minute), asynq.Queue("default"))
 	return err
 }
 
@@ -218,6 +232,10 @@ func transcribePage(book Book, chunk BookChunk, userID uint, accountType string)
 		"final_audio_path": key,
 		"tts_status":       "completed",
 	})
+	// Follow-on: package this page as HLS (non-blocking — doesn't gate playback).
+	if err := enqueueHLSPackage(book.ID, chunk.Index); err != nil {
+		log.Printf("⚠️ failed to enqueue HLS for book %d page %d: %v", book.ID, chunk.Index, err)
+	}
 	return nil
 }
 
@@ -354,6 +372,30 @@ func handleParseBook(ctx context.Context, t *asynq.Task) error {
 	}
 	db.Model(&Book{}).Where("id = ?", p.BookID).Update("status", "pending")
 	log.Printf("📖 Parsed book %d into %d pages (ready for transcription)", p.BookID, pages)
+	return nil
+}
+
+// handleHLSPackage segments a completed page's audio into HLS and stores the
+// playlist key on the chunk (idempotent). Runs as a follow-on so it never slows
+// the listen-ready path.
+func handleHLSPackage(ctx context.Context, t *asynq.Task) error {
+	var p TaskHLSPackage
+	if err := json.Unmarshal(t.Payload(), &p); err != nil {
+		return fmt.Errorf("bad payload: %v: %w", err, asynq.SkipRetry)
+	}
+	var chunk BookChunk
+	if err := db.Where("book_id = ? AND \"index\" = ?", p.BookID, p.PageIndex).First(&chunk).Error; err != nil {
+		return err
+	}
+	if chunk.HLSPath != "" || chunk.FinalAudioPath == "" {
+		return nil // already packaged, or no source yet
+	}
+	key, err := packageHLS(p.BookID, p.PageIndex, chunk.FinalAudioPath)
+	if err != nil {
+		return err
+	}
+	db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("hls_path", key)
+	log.Printf("🎞️ HLS packaged for book %d page %d → %s", p.BookID, p.PageIndex, key)
 	return nil
 }
 

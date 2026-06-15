@@ -74,6 +74,7 @@ type BookChunk struct {
 	Content        string `gorm:"type:text"` // Text content of the chunk
 	AudioPath      string `gorm:"not null"`
 	FinalAudioPath string `json:"final_audio_path"` // 👈 New field
+	HLSPath        string `json:"hls_path"`         // R2 key of the HLS playlist (Phase 5C)
 	TTSStatus      string // values: "pending", "processing", "completed", "failed"
 	StartTime      int64  // Start time in seconds
 	EndTime        int64  // End time in seconds
@@ -235,6 +236,8 @@ func main() {
 
 		// adding a route to pull audio and backgrond music for a book
 		authorized.GET("/books/:book_id/pages/:page/audio", requireBookOwnership(), streamSinglePageAudioHandler)
+		// HLS playlist for a page (Phase 5C) — segments served direct from R2.
+		authorized.GET("/books/:book_id/pages/:page/hls.m3u8", requireBookOwnership(), serveHLSHandler)
 
 		// Book search/discovery endpoint - AI-powered book suggestions
 		authorized.POST("/search-books", SearchBooksHandler)
