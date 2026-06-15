@@ -155,6 +155,11 @@ func main() {
 		}()
 	}
 
+	// Prometheus collectors (asynq queue metrics from Redis).
+	if err := initMetrics(); err != nil {
+		log.Printf("⚠️ metrics init failed: %v", err)
+	}
+
 	// Initialize Gin router.
 	router := gin.Default()
 
@@ -162,6 +167,9 @@ func main() {
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "content-service"})
 	})
+
+	// Prometheus scrape endpoint.
+	router.GET("/metrics", metricsHandler())
 
 	// Insanaty check for MQTT
 	router.GET("/debug/mqtt", func(c *gin.Context) {
