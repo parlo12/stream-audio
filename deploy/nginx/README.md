@@ -32,3 +32,21 @@ Applied June 15, 2026 (Phase 5):
 5. Roll back by restoring the backup + `systemctl reload nginx`.
 
 Tune the rate via the `rate=`/`burst=` values; raise if legitimate users hit 429.
+
+## asynq queue dashboard (Phase 5A)
+
+The `asynqmon` container (compose) binds `127.0.0.1:8085`. nginx fronts it at
+`/admin/queues/` behind HTTP basic auth:
+```nginx
+location /admin/queues/ {
+    auth_basic "Restricted";
+    auth_basic_user_file /etc/nginx/.queues_htpasswd;
+    proxy_pass http://localhost:8085/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+Credentials live in `/etc/nginx/.queues_htpasswd` (created via
+`openssl passwd -apr1`); rotate with that file + `systemctl reload nginx`.
