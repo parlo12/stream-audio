@@ -229,8 +229,8 @@ tts_queue_jobs → superseded by asynq (Redis) + transcription_batches
 
 | Phase | Scope | Risk |
 |---|---|---|
-| **1. Storage swap** | Add `MediaStore` (S3 interface) to content-service; workers/handlers write+read Spaces instead of local disk; streaming handlers switch to 302→presigned CDN URL; migrate existing `/opt/stream-audio-data` files with `rclone` | Low — no API contract changes; iOS unchanged (AVPlayer follows redirects) |
-| **2. Queue + worker split** | Introduce asynq; move `processBookConversion`/batch TTS into `content-worker`; add `transcription_batches`; keep the old synchronous endpoints as thin enqueue wrappers | Medium — deployment topology changes (one new container) |
+| **1. Storage swap** ✅ DONE (Jun 15 2026) | Cloudflare R2 instead of Spaces; `MediaStore` (`mediastore.go`), all media→R2 keys, streaming via 302 presigned + legacy fallback, existing files migrated via `rclone` + DB rewrite. | shipped |
+| **2. Queue + worker split** ✅ DONE (Jun 15 2026) | asynq on the existing Redis; `RUN_MODE=api\|worker`; new `content-worker` container; progressive 20-page `transcribe:batch` (auto-enqueue next + MQTT `pages_ready`) + `chunks:merge` + `cover:fetch`; `transcription_batches` table; retired the `TTSQueueJob` poller. Verified: api enqueues, worker does all FFmpeg. | shipped |
 | **3. Presigned uploads** | `uploads/initiate` + `complete` + reconciliation sweeper; iOS switches `UploadBookView` to background `URLSession` PUT; keep the legacy multipart endpoint during transition, then retire it (kills the nginx 413 class of bugs for good) | Medium — coordinated iOS release |
 | **4. Quotas + notifications** | `plan_limits`, `usage_events`, Redis counters, quota middleware, APNs sender, 20-page batch notifications + pause-ahead window | Medium — product decisions needed on limits |
 | **5. Polish (optional)** | HLS packaging for seamless long-book playback; R2 evaluation if egress costs bite; asynqmon + Prometheus dashboards; autoscaling workers off queue depth | Low, incremental |
