@@ -117,10 +117,10 @@ Exploitable holes closed this pass (S6/S7/Q11/B2); admin/restore lifecycle (S5/S
 27. ~~**Correctness sweep**~~ ✅ — Q7 (right error var), Q8 (`audio_url` uses `Index+1`), Q9 (real pageIndexes + `shortHash` guard), Q12 (async uses `ChunkDocumentBatch`), Q10 (EPUB `stripHTML` + real `cleanUTF8`).
 28. ~~**Tests**~~ ✅ — `pipeline_test.go`: `shortHash`, `stripHTML`, `cleanUTF8`, `effectCache` `-race`; plus existing `upload_path_test.go`.
 
-### Phase 4 — Payments & lifecycle correctness (1–2 days)
+### Phase 4 — Payments & lifecycle correctness ✅ DONE (June 15, 2026)
 
-29. Resolve the **double price line-item** (B7), move price IDs to env/config, and reconcile the $15 vs $24.99 pricing across docs, `PricingConfiguration.swift`, Stripe, and App Store Connect.
-30. **Webhook coverage** (B8): handle `invoice.payment_failed` (grace → downgrade), `customer.subscription.updated`, store processed `event.ID`s for idempotency; reconcile `AccountType` from Stripe on restore and on a daily sweep.
+29. ~~**Double price line-item** (B7)~~ ✅ — checkout now bills a single subscription price from `STRIPE_PRICE_ID` (no hardcoded IDs); session carries `user_id` metadata. **Deploy/coord note:** point `STRIPE_PRICE_ID` at the intended price and reconcile $15 vs $24.99 across `PricingConfiguration.swift`, Stripe, and App Store Connect.
+30. **Webhook coverage** (B8): ~~`invoice.payment_failed` (grace, no downgrade), `customer.subscription.updated` (status-driven tier), idempotency via `processed_stripe_events`~~ ✅. **Deferred:** daily Stripe→DB reconcile sweep + reconcile-on-restore (restore is disabled / S5; revisit with Phase 5 quotas).
 
 ### Phase 5 — Hygiene that keeps it fixed (parallel/ongoing)
 
@@ -150,6 +150,6 @@ With the above done, start [structureImprovmentPlan.md](structureImprovmentPlan.
 2. ~~Social-login verification + signing-method pin~~ → **Phase 1 ✅** (shared-package extraction deferred to Phase 5).
 3. ~~Ownership middleware + upload hardening + cascade delete + admin column fix~~ → **Phase 2 ✅** (restore redesign S5 + admin audit/wipe S10 deferred).
 4. ~~Temp dirs, locks, per-page context, Foley fade, caching, tests~~ → **Phase 3 ✅** (multi-voice toggle Q4 left always-on per product decision).
-5. Stripe line-items + webhook coverage + pricing reconciliation → **Phase 4.**
+5. ~~Stripe single price + webhook coverage + idempotency~~ → **Phase 4 ✅** (pricing reconciliation = deploy note; daily reconcile sweep deferred).
 6. Package split, migrations, gateway hardening, Keychain, docs → **Phase 5 (parallelizable).**
 7. Begin the storage/queue/presigned/quota migration → **Phase 6 / other doc.**

@@ -24,6 +24,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/stripe/stripe-go/v78"
 	"github.com/stripe/stripe-go/v78/checkout/session"
@@ -392,7 +393,7 @@ func setupDatabase() {
 	}
 
 	// Run migrations
-	if err := db.AutoMigrate(&User{}, &UserHistory{}, &UserBookHistory{}); err != nil {
+	if err := db.AutoMigrate(&User{}, &UserHistory{}, &UserBookHistory{}, &ProcessedStripeEvent{}); err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
 	}
 
@@ -588,23 +589,32 @@ func createCheckoutSessionHandler(c *gin.Context) {
 		db.Save(&user) // Save to DB
 	}
 
-	// 5. Create Stripe Checkout session
+	// 5. Create Stripe Checkout session.
+	// B7: bill a SINGLE subscription price from config — the previous code
+	// added two line items, double-charging every subscriber.
+	priceID := getEnv("STRIPE_PRICE_ID", "")
+	if priceID == "" {
+		log.Printf("❌ STRIPE_PRICE_ID not configured")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Billing is not configured"})
+		return
+	}
 	params := &stripe.CheckoutSessionParams{
 		Customer:           stripe.String(customerID),
 		PaymentMethodTypes: stripe.StringSlice([]string{"card"}),
 		Mode:               stripe.String(string(stripe.CheckoutSessionModeSubscription)),
 		LineItems: []*stripe.CheckoutSessionLineItemParams{
 			{
-				Price:    stripe.String("price_1Rq20XChBqCooXQK4rkn86Vr"), // 🔁 Replace with your Stripe Price ID
-				Quantity: stripe.Int64(1),
-			},
-			{
-				Price:    stripe.String("price_1Rq1zUChBqCooXQK1QsUsfFr"),
+				Price:    stripe.String(priceID),
 				Quantity: stripe.Int64(1),
 			},
 		},
 		SuccessURL: stripe.String(getEnv("STRIPE_SUCCESS_URL", "https://narrafied.com/thank-you-page")),
 		CancelURL:  stripe.String(getEnv("STRIPE_CANCEL_URL", "https://narrafied.com/cancel")),
+	}
+	// Carry user_id so the user is recoverable from events.
+	params.Metadata = map[string]string{"user_id": strconv.FormatUint(uint64(userID), 10)}
+	params.SubscriptionData = &stripe.CheckoutSessionSubscriptionDataParams{
+		Metadata: map[string]string{"user_id": strconv.FormatUint(uint64(userID), 10)},
 	}
 	s, err := session.New(params)
 	if err != nil {
@@ -617,6 +627,32 @@ func createCheckoutSessionHandler(c *gin.Context) {
 }
 
 //adding stripe webhookhandler
+
+// ProcessedStripeEvent records handled Stripe webhook event IDs so retried
+// deliveries are not processed twice (B8 idempotency).
+type ProcessedStripeEvent struct {
+	EventID     string `gorm:"primaryKey"`
+	EventType   string
+	ProcessedAt time.Time
+}
+
+// accountTypeForSubStatus maps a Stripe subscription status to our account tier.
+// active/trialing keep paid access (incl. cancel-at-period-end, which stays
+// active until the period ends); dunning/cancelled states drop to free.
+func accountTypeForSubStatus(status stripe.SubscriptionStatus) string {
+	switch status {
+	case stripe.SubscriptionStatusActive, stripe.SubscriptionStatusTrialing:
+		return "paid"
+	case stripe.SubscriptionStatusPastDue,
+		stripe.SubscriptionStatusCanceled,
+		stripe.SubscriptionStatusUnpaid,
+		stripe.SubscriptionStatusIncompleteExpired:
+		return "free"
+	default:
+		// incomplete / paused — no confirmed paid access.
+		return "free"
+	}
+}
 
 func stripeWebhookHandler(c *gin.Context) {
 	const MaxBodyBytes = int64(65536)
@@ -642,7 +678,25 @@ func stripeWebhookHandler(c *gin.Context) {
 		return
 	}
 
-	log.Printf("✅ Webhook received: %s", event.Type)
+	log.Printf("✅ Webhook received: %s (%s)", event.Type, event.ID)
+
+	// B8 idempotency: claim the event atomically. If the row already exists
+	// (Stripe retried), RowsAffected is 0 and we skip reprocessing.
+	claim := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&ProcessedStripeEvent{
+		EventID:     event.ID,
+		EventType:   string(event.Type),
+		ProcessedAt: time.Now(),
+	})
+	if claim.Error != nil {
+		log.Printf("⚠️ could not record stripe event %s: %v", event.ID, claim.Error)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "could not record event"})
+		return
+	}
+	if claim.RowsAffected == 0 {
+		log.Printf("↩️ duplicate stripe event %s ignored", event.ID)
+		c.JSON(http.StatusOK, gin.H{"status": "duplicate ignored"})
+		return
+	}
 
 	switch event.Type {
 
@@ -656,6 +710,17 @@ func stripeWebhookHandler(c *gin.Context) {
 		customerID := session.Customer.ID
 		updateUserAccountType(customerID, "paid")
 
+	case "customer.subscription.updated":
+		// Renewal/cancel/reactivation: reconcile tier from the live status so a
+		// failed renewal (past_due) downgrades and a recovery re-upgrades.
+		var sub stripe.Subscription
+		if err := json.Unmarshal(event.Data.Raw, &sub); err != nil {
+			log.Printf("⚠️ Failed to parse subscription update: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to parse subscription"})
+			return
+		}
+		updateUserAccountType(sub.Customer.ID, accountTypeForSubStatus(sub.Status))
+
 	case "customer.subscription.deleted":
 		var sub stripe.Subscription
 		if err := json.Unmarshal(event.Data.Raw, &sub); err != nil {
@@ -663,9 +728,18 @@ func stripeWebhookHandler(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to parse subscription"})
 			return
 		}
-		customerID := sub.Customer.ID
-		updateUserAccountType(customerID, "free")
+		updateUserAccountType(sub.Customer.ID, "free")
 
+	case "invoice.payment_failed":
+		// Grace: do NOT downgrade here. Stripe's dunning retries the charge;
+		// the eventual subscription.updated/deleted handles the downgrade.
+		var inv stripe.Invoice
+		if err := json.Unmarshal(event.Data.Raw, &inv); err == nil {
+			log.Printf("⚠️ invoice.payment_failed for customer %s (grace; awaiting retry)", inv.Customer.ID)
+		}
+
+	default:
+		log.Printf("ℹ️ unhandled stripe event type: %s", event.Type)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "received"})
