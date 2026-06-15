@@ -290,8 +290,12 @@ func setupDatabase() {
 
 	log.Printf("Connected to database host=%s dbname=%s sslmode=%s", dbHost, dbName, sslMode)
 
-	if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}, &PlaybackProgress{}, &TranscriptionBatch{}); err != nil {
-		log.Fatalf("AutoMigrate failed: %v", err)
+	// Only the API owns schema migrations. Workers skip AutoMigrate so a
+	// co-deploy doesn't race two concurrent CREATE TABLEs (Postgres DDL race).
+	if getEnv("RUN_MODE", "both") != "worker" {
+		if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}, &PlaybackProgress{}, &TranscriptionBatch{}); err != nil {
+			log.Fatalf("AutoMigrate failed: %v", err)
+		}
 	}
 	log.Println("Database connected and migrated successfully")
 }
