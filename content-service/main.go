@@ -454,8 +454,10 @@ func listBookPagesHandler(c *gin.Context) {
 			"content": chunk.Content,
 			"status":  chunk.TTSStatus,
 			// "audio_url": chunk.AudioPath,
+			// Q8: the /pages/:page/audio route is 1-based (it subtracts 1), so
+			// emit the 1-based page number, not the 0-based chunk index.
 			"audio_url": fmt.Sprintf("%s/user/books/%d/pages/%d/audio",
-				getEnv("STREAM_HOST", "https://narrafied.com"), chunk.BookID, chunk.Index),
+				getEnv("STREAM_HOST", "https://narrafied.com"), chunk.BookID, chunk.Index+1),
 		})
 	}
 
@@ -669,11 +671,21 @@ func getUserAccountType(token string) (string, error) {
 	return result.AccountType, nil
 }
 
+// freeTierPageLimit is the max number of completed pages a free user may have.
+func freeTierPageLimit() int64 {
+	if v := os.Getenv("FREE_TIER_PAGE_LIMIT"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 1
+}
+
 func BatchTranscribeBookHandler(c *gin.Context) {
+	// Ownership already verified by requireBookOwnership(); reuse the book.
+	book := c.MustGet("book").(Book)
+	userID := getUserIDFromContext(c)
 
-	bookID := c.Param("book_id")
-
-	// Free account check begins here
 	authHeader := c.GetHeader("Authorization")
 	token, err := extractToken(authHeader)
 	if err != nil {
@@ -688,21 +700,22 @@ func BatchTranscribeBookHandler(c *gin.Context) {
 		return
 	}
 
+	freeLimit := freeTierPageLimit()
 	if accountType == "free" {
 		var completedChunks int64
 		db.Model(&BookChunk{}).
 			Joins("JOIN books ON books.id = book_chunks.book_id").
-			Where("book_chunks.tts_status = ? AND books.user_id = ?", "completed", getUserIDFromContext(c)).
+			Where("book_chunks.tts_status = ? AND books.user_id = ?", "completed", userID).
 			Count(&completedChunks)
 
-		if completedChunks >= 1 {
+		if completedChunks >= freeLimit {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Free trial limit reached. Upgrade your plan to continue transcribing."})
 			return
 		}
 	}
 
 	var chunks []BookChunk
-	if err := db.Where("book_id = ? AND tts_status != ?", bookID, "completed").Order("index ASC").Find(&chunks).Error; err != nil {
+	if err := db.Where("book_id = ? AND tts_status != ?", book.ID, "completed").Order("index ASC").Find(&chunks).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not fetch chunks"})
 		return
 	}
@@ -712,60 +725,92 @@ func BatchTranscribeBookHandler(c *gin.Context) {
 		return
 	}
 
+	// B6: atomic job lock — only one transcription may run per book. Claim the
+	// book by flipping status to 'processing' only if it isn't already.
+	claim := db.Model(&Book{}).
+		Where("id = ? AND status <> ?", book.ID, "processing").
+		Update("status", "processing")
+	if claim.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not lock book for processing"})
+		return
+	}
+	if claim.RowsAffected == 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "Transcription already in progress for this book"})
+		return
+	}
+
 	go func() {
 		for _, chunk := range chunks {
-			db.Model(&chunk).Update("TTSStatus", "processing")
+			// B6: free-tier cap enforced INSIDE the loop (local DB count, no
+			// per-page HTTP) so a free user can't transcribe a whole book.
+			if accountType == "free" {
+				var completed int64
+				db.Model(&BookChunk{}).
+					Joins("JOIN books ON books.id = book_chunks.book_id").
+					Where("book_chunks.tts_status = ? AND books.user_id = ?", "completed", userID).
+					Count(&completed)
+				if completed >= freeLimit {
+					log.Printf("🛑 Free-tier cap (%d) reached for user %d; stopping batch for book %d", freeLimit, userID, book.ID)
+					break
+				}
+			}
+
+			// Q6: atomically claim the chunk so concurrent loops can't double-process.
+			claimChunk := db.Model(&BookChunk{}).
+				Where("id = ? AND tts_status NOT IN ?", chunk.ID, []string{"processing", "completed"}).
+				Update("tts_status", "processing")
+			if claimChunk.RowsAffected == 0 {
+				continue
+			}
 
 			audioPath, err := convertTextToAudio(chunk.Content, chunk.ID)
 			if err != nil {
-				db.Model(&chunk).Update("TTSStatus", "failed")
+				db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "failed")
 				continue
 			}
 
-			// Compute hash of the chunk content
 			hash := fmt.Sprintf("%x", sha256.Sum256([]byte(chunk.Content)))
 
-			// Load book info
-			var book Book
-			if err := db.First(&book, chunk.BookID).Error; err != nil {
-				log.Printf("Book not found for chunk %d: %v", chunk.ID, err)
-				continue
-			}
-
-			// Update book's Index temporarily for naming
-			book.Index = chunk.Index
-
-			// Generate background music and merge it
-			bgPrompt, err := generateOverallSoundPrompt(book.FilePath)
+			// Q1: analyze and score this page's own text.
+			bgPrompt, err := generateOverallSoundPrompt(chunk.Content)
 			if err != nil {
-				log.Printf("Prompt generation failed: %v", err)
+				log.Printf("Prompt generation failed for chunk %d: %v", chunk.ID, err)
+				db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "failed")
 				continue
 			}
 
-			bgMusic, err := generateSoundEffect(bgPrompt)
+			// Q3: reuse cached music for identical prompts.
+			bgMusic, err := getOrGenerateBackgroundMusic(bgPrompt)
 			if err != nil {
-				log.Printf("Music generation failed: %v", err)
+				log.Printf("Music generation failed for chunk %d: %v", chunk.ID, err)
+				db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "failed")
 				continue
 			}
 
-			mergedAudio, err := mergeAudio(audioPath, bgMusic, book, chunk.Index, book.FilePath, hash)
+			mergedAudio, err := mergeAudio(audioPath, bgMusic, book, chunk.Index, chunk.Content, hash)
 			if err != nil {
-				log.Printf("Audio merge failed: %v", err)
+				log.Printf("Audio merge failed for chunk %d: %v", chunk.ID, err)
+				db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "failed")
 				continue
 			}
 
-			// Update the chunk's audio path
-			chunk.AudioPath = mergedAudio
-			chunk.TTSStatus = "completed"
-			db.Save(&chunk)
+			db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Updates(map[string]interface{}{
+				"audio_path": mergedAudio,
+				"tts_status": "completed",
+			})
 		}
 
-		// Final status check
+		// Release the book lock: completed if nothing remains, else back to
+		// 'pending' so a retry can re-claim it (never leave it stuck in
+		// 'processing').
 		var remaining int64
-		db.Model(&BookChunk{}).Where("book_id = ? AND tts_status != ?", bookID, "completed").Count(&remaining)
+		db.Model(&BookChunk{}).Where("book_id = ? AND tts_status != ?", book.ID, "completed").Count(&remaining)
 		if remaining == 0 {
-			db.Model(&Book{}).Where("id = ?", bookID).Update("status", "completed")
-			log.Printf("✅ Book %s fully transcribed", bookID)
+			db.Model(&Book{}).Where("id = ?", book.ID).Update("status", "completed")
+			log.Printf("✅ Book %d fully transcribed", book.ID)
+		} else {
+			db.Model(&Book{}).Where("id = ?", book.ID).Update("status", "pending")
+			log.Printf("ℹ️ Book %d batch ended with %d chunks remaining", book.ID, remaining)
 		}
 	}()
 

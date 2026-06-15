@@ -105,9 +105,10 @@ func ChunkDocumentAsync(bookID uint, filePath string) (estimatedChunks int, err 
 	// Update book status to "chunking"
 	db.Model(&Book{}).Where("id = ?", bookID).Update("status", "chunking")
 
-	// Process in background goroutine
+	// Process in background goroutine. Q12: use the batch-insert path (this is
+	// the path chosen for *large* books, so it must be the fast one).
 	go func() {
-		actualChunks, err := ChunkDocument(bookID, filePath)
+		actualChunks, err := ChunkDocumentBatch(bookID, filePath)
 		if err != nil {
 			log.Printf("❌ Async chunking failed for book %d: %v", bookID, err)
 			db.Model(&Book{}).Where("id = ?", bookID).Update("status", "chunking_failed")
@@ -208,9 +209,19 @@ func ExtractTextByType(path string) (string, error) {
 
 // Add ExtractTextFromPDF, ExtractTextFromTXT, ExtractTextFromEPUB...
 // You may already have this in utils — import and call it
+// cleanUTF8 drops invalid UTF-8 byte sequences and strips control characters
+// (except common whitespace) so TTS doesn't choke on garbage bytes (Q10).
 func cleanUTF8(input []byte) string {
-	// Your existing clean function goes here
-	return string(input) // Replace this with your actual implementation
+	s := strings.ToValidUTF8(string(input), "")
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' || r == '\r' {
+			return r
+		}
+		if r < 0x20 || r == 0x7f {
+			return -1 // drop other control chars
+		}
+		return r
+	}, s)
 }
 
 func ExtractTextFromTXT(path string) (string, error) {
@@ -285,12 +296,61 @@ func ExtractTextFromEPUB(path string) (string, error) {
 			if err != nil {
 				continue
 			}
-			sb.WriteString(string(content))
+			// Q10: strip HTML/CSS markup so chunks hold readable text, not tags.
+			sb.WriteString(stripHTML(string(content)))
 			sb.WriteString("\n")
 		}
 	}
 
 	return sb.String(), nil
+}
+
+// stripHTML removes <script>/<style> blocks and all tags from HTML/XHTML,
+// decodes common entities, and collapses whitespace, leaving readable text (Q10).
+func stripHTML(s string) string {
+	// Drop <script>…</script> and <style>…</style> wholesale.
+	for _, tag := range []string{"script", "style"} {
+		for {
+			lower := strings.ToLower(s)
+			open := strings.Index(lower, "<"+tag)
+			if open < 0 {
+				break
+			}
+			close := strings.Index(lower[open:], "</"+tag+">")
+			if close < 0 {
+				s = s[:open]
+				break
+			}
+			end := open + close
+			if gt := strings.Index(lower[end:], ">"); gt >= 0 {
+				end += gt + 1
+			}
+			s = s[:open] + " " + s[end:]
+		}
+	}
+
+	// Remove all remaining tags.
+	var b strings.Builder
+	inTag := false
+	for _, r := range s {
+		switch {
+		case r == '<':
+			inTag = true
+		case r == '>':
+			inTag = false
+			b.WriteByte(' ')
+		case !inTag:
+			b.WriteRune(r)
+		}
+	}
+
+	out := b.String()
+	out = strings.NewReplacer(
+		"&nbsp;", " ", "&amp;", "&", "&lt;", "<", "&gt;", ">",
+		"&quot;", "\"", "&#39;", "'", "&apos;", "'",
+	).Replace(out)
+
+	return strings.Join(strings.Fields(out), " ")
 }
 
 // ExtractTextFromMOBI extracts text from MOBI, AZW, and AZW3 files

@@ -12,9 +12,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -39,7 +39,21 @@ type SoundEffectRequest struct {
 	PromptInfluence float64 `json:"prompt_influence,omitempty"`
 }
 
-var effectCache = map[string]string{}
+// effectCache maps a Foley event type to its generated clip path.
+// effectCacheMu guards it — it is read/written from concurrent transcription
+// goroutines, and a plain map would panic under concurrent writes (B5).
+var (
+	effectCache   = map[string]string{}
+	effectCacheMu sync.RWMutex
+)
+
+// musicCache maps a background-music prompt hash to its generated clip path so
+// identical prompts reuse one ElevenLabs generation instead of regenerating per
+// page (Q3). Guarded by musicCacheMu.
+var (
+	musicCache   = map[string]string{}
+	musicCacheMu sync.RWMutex
+)
 
 // effectPrompts contains high-quality, detailed prompts for common sound effects
 // Format: descriptive, professional foley-style descriptions for clean output
@@ -128,12 +142,44 @@ func generateSoundEffect(prompt string, id ...interface{}) (string, error) {
 	if len(id) > 0 {
 		out = fmt.Sprintf("./audio/sound_effect_%v.mp3", id[0])
 	} else {
-		out = "./audio/sound_effect.mp3"
+		// B4: never write a shared fixed path — concurrent jobs would clobber
+		// each other. Fall back to a unique temp name.
+		f, err := os.CreateTemp("./audio", "sound_effect_*.mp3")
+		if err != nil {
+			return "", fmt.Errorf("temp sound file: %w", err)
+		}
+		out = f.Name()
+		f.Close()
 	}
 	if err := os.WriteFile(out, data, 0644); err != nil {
 		return "", fmt.Errorf("write sound file: %w", err)
 	}
 	return out, nil
+}
+
+// getOrGenerateBackgroundMusic returns a background-music clip for prompt,
+// reusing a cached generation when the same prompt was already rendered (Q3).
+// The cache key is a hash of the prompt, which also gives each clip a unique,
+// collision-free filename (B4).
+func getOrGenerateBackgroundMusic(prompt string) (string, error) {
+	key := fmt.Sprintf("%x", sha256.Sum256([]byte(prompt)))[:16]
+
+	musicCacheMu.RLock()
+	if p, ok := musicCache[key]; ok && fileExists(p) {
+		musicCacheMu.RUnlock()
+		log.Printf("🔄 [Music Cache] Reusing background music for prompt %s", key)
+		return p, nil
+	}
+	musicCacheMu.RUnlock()
+
+	p, err := generateSoundEffect(prompt, key)
+	if err != nil {
+		return "", err
+	}
+	musicCacheMu.Lock()
+	musicCache[key] = p
+	musicCacheMu.Unlock()
+	return p, nil
 }
 
 // generateFoleyEffect generates a SHORT sound effect (1-5 seconds) for Foley overlay
@@ -220,17 +266,14 @@ func fallbackSegments(ttsDur float64) []Segment {
 	return out
 }
 
-// generateSegmentInstructions calls GPT to get emotion-based time segments.
-func generateSegmentInstructions(ttsDur float64, bookPath string) ([]Segment, error) {
+// generateSegmentInstructions calls GPT to get emotion-based time segments for
+// the supplied page excerpt (Q1: the chunk's own text, not the whole book).
+func generateSegmentInstructions(ttsDur float64, excerpt string) ([]Segment, error) {
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
 		return nil, errors.New("OPENAI_API_KEY not set")
 	}
-	raw, err := os.ReadFile(bookPath)
-	if err != nil {
-		return nil, fmt.Errorf("read book: %w", err)
-	}
-	summary := summurizedBookText(string(raw))
+	summary := summurizedBookText(excerpt)
 	num := int(math.Ceil(ttsDur / 22.0))
 
 	prompt := fmt.Sprintf(`You are an audio segmentation assistant.
@@ -303,8 +346,10 @@ var moodToVolume = map[string]float64{
 	"neutral":  0.25,
 }
 
-// generateDynamicBackgroundWithSegments creates background music with smooth crossfade transitions
-func generateDynamicBackgroundWithSegments(ttsDur float64, bgPath string, segs []Segment) (string, error) {
+// generateDynamicBackgroundWithSegments creates background music with smooth
+// crossfade transitions. All intermediate files are written under jobDir (a
+// per-job temp dir owned by the caller) so concurrent jobs never collide (B4).
+func generateDynamicBackgroundWithSegments(ttsDur float64, bgPath string, segs []Segment, jobDir string) (string, error) {
 	if len(segs) == 0 {
 		return "", errors.New("no segments provided")
 	}
@@ -323,7 +368,7 @@ func generateDynamicBackgroundWithSegments(ttsDur float64, bgPath string, segs [
 			vol = 0.25 // default
 		}
 
-		out := fmt.Sprintf("./dyn_seg_%d.ogg", i)
+		out := fmt.Sprintf("%s/dyn_seg_%d.ogg", jobDir, i)
 
 		// Create segment with appropriate duration and volume
 		// Add 0.5s extra for crossfade overlap
@@ -352,7 +397,7 @@ func generateDynamicBackgroundWithSegments(ttsDur float64, bgPath string, segs [
 
 	// If only one segment, just use it directly
 	if len(segmentPaths) == 1 {
-		finalBg := "./audio/dynamic_background_final.ogg"
+		finalBg := fmt.Sprintf("%s/dynamic_background_final.ogg", jobDir)
 		if o, err := exec.Command("ffmpeg", "-y", "-i", segmentPaths[0],
 			"-af", fmt.Sprintf("atrim=duration=%.2f,afade=t=in:st=0:d=1,afade=t=out:st=%.2f:d=2", ttsDur, ttsDur-2),
 			"-c:a", "libopus", "-b:a", "64k",
@@ -367,7 +412,7 @@ func generateDynamicBackgroundWithSegments(ttsDur float64, bgPath string, segs [
 	// Build complex filter for crossfading multiple segments
 	currentInput := segmentPaths[0]
 	for i := 1; i < len(segmentPaths); i++ {
-		tempOutput := fmt.Sprintf("./dyn_crossfade_%d.ogg", i)
+		tempOutput := fmt.Sprintf("%s/dyn_crossfade_%d.ogg", jobDir, i)
 		crossfadeDur := 0.5 // 0.5 second crossfade
 
 		cmd := exec.Command("ffmpeg", "-y",
@@ -388,7 +433,7 @@ func generateDynamicBackgroundWithSegments(ttsDur float64, bgPath string, segs [
 	}
 
 	// Apply final trim and fade out
-	finalBg := "./audio/dynamic_background_final.ogg"
+	finalBg := fmt.Sprintf("%s/dynamic_background_final.ogg", jobDir)
 	if o, err := exec.Command("ffmpeg", "-y", "-i", currentInput,
 		"-af", fmt.Sprintf("atrim=duration=%.2f,afade=t=in:st=0:d=1,afade=t=out:st=%.2f:d=2", ttsDur, ttsDur-2),
 		"-c:a", "libopus", "-b:a", "64k",
@@ -412,7 +457,14 @@ func computeContentHash(filePath string) (string, error) {
 
 // mergeAudio overlays TTS narration with dynamic background music AND ambient soundscape
 // Audio layers: TTS (1.0) + Background Music (dynamic) + Ambient Soundscape (0.08-0.18)
-func mergeAudio(ttsPath, bgPath string, book Book, pageIndex int, bookPath string, hash string) (string, error) {
+func mergeAudio(ttsPath, bgPath string, book Book, pageIndex int, excerpt string, hash string) (string, error) {
+	// B4: per-job temp dir for all intermediate files; removed when we return.
+	jobDir, err := os.MkdirTemp("", "narrafied-mix-*")
+	if err != nil {
+		return "", fmt.Errorf("temp dir: %w", err)
+	}
+	defer os.RemoveAll(jobDir)
+
 	out, err := exec.Command("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", ttsPath).Output()
 	if err != nil {
 		return "", fmt.Errorf("ffprobe: %w", err)
@@ -420,21 +472,22 @@ func mergeAudio(ttsPath, bgPath string, book Book, pageIndex int, bookPath strin
 	dur, _ := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
 	log.Printf("🎙️ [Mix] TTS duration: %.2f seconds", dur)
 
-	// Generate mood segments with crossfade transitions
-	segs, err := generateSegmentInstructions(dur, bookPath)
+	// Generate mood segments with crossfade transitions (Q1: analyze this
+	// page's own text, not the first page of the whole book).
+	segs, err := generateSegmentInstructions(dur, excerpt)
 	if err != nil {
 		return "", err
 	}
-	dynBg, err := generateDynamicBackgroundWithSegments(dur, bgPath, segs)
+	dynBg, err := generateDynamicBackgroundWithSegments(dur, bgPath, segs, jobDir)
 	if err != nil {
 		return "", err
 	}
 
-	outFile := fmt.Sprintf("./audio/book_%d_page_%d_%s.mp3", book.ID, pageIndex, hash[:8])
+	outFile := fmt.Sprintf("./audio/book_%d_page_%d_%s.mp3", book.ID, pageIndex, shortHash(hash))
 
 	// Try to detect and generate ambient soundscape
 	ambientPath := ""
-	ambientSetting, err := detectAmbientSetting(bookPath)
+	ambientSetting, err := detectAmbientSetting(excerpt)
 	if err != nil {
 		log.Printf("⚠️ [Mix] Ambient detection failed: %v, continuing without ambient", err)
 	} else if ambientSetting.Setting != "neutral" || ambientSetting.Intensity > 0.3 {
@@ -444,7 +497,7 @@ func mergeAudio(ttsPath, bgPath string, book Book, pageIndex int, bookPath strin
 			log.Printf("⚠️ [Mix] Ambient generation failed: %v", err)
 		} else {
 			// Loop ambient to match TTS duration
-			loopedAmbient, err := loopAmbientToLength(rawAmbient, dur, ambientSetting.Intensity, book.ID, pageIndex)
+			loopedAmbient, err := loopAmbientToLength(rawAmbient, dur, ambientSetting.Intensity, jobDir)
 			if err != nil {
 				log.Printf("⚠️ [Mix] Ambient loop failed: %v", err)
 			} else {
@@ -458,8 +511,9 @@ func mergeAudio(ttsPath, bgPath string, book Book, pageIndex int, bookPath strin
 
 	var cmd *exec.Cmd
 	if ambientPath != "" {
-		// 3-layer mix: TTS + Music + Ambient
-		filterComplex := "[0:a]volume=1.0[tts];[1:a][tts]amix=inputs=2:duration=first[mix1];[2:a][mix1]amix=inputs=2:duration=first[aout]"
+		// 3-layer mix: TTS + Music + Ambient. Q5: explicit weights so amix
+		// does not average (which would halve narration volume).
+		filterComplex := "[0:a]volume=1.0[tts];[1:a]volume=1.0[mus];[2:a]volume=1.0[amb];[tts][mus][amb]amix=inputs=3:duration=first:normalize=0:weights=1.0 0.3 0.15[aout]"
 		cmd = exec.Command("ffmpeg", "-y",
 			"-i", ttsPath,
 			"-i", dynBg,
@@ -472,8 +526,8 @@ func mergeAudio(ttsPath, bgPath string, book Book, pageIndex int, bookPath strin
 		)
 		log.Printf("🎚️ [Mix] 3-layer mix: TTS + Music + Ambient")
 	} else {
-		// 2-layer mix: TTS + Music (original behavior)
-		filterComplex := "[0:a]volume=1.0[a0];[1:a][a0]amix=inputs=2:duration=first[aout]"
+		// 2-layer mix: TTS + Music. Q5: explicit weights (no averaging).
+		filterComplex := "[0:a]volume=1.0[tts];[1:a]volume=1.0[mus];[tts][mus]amix=inputs=2:duration=first:normalize=0:weights=1.0 0.3[aout]"
 		cmd = exec.Command("ffmpeg", "-y",
 			"-i", ttsPath,
 			"-i", dynBg,
@@ -563,18 +617,15 @@ var ambientPrompts = map[string]string{
 	"neutral":      "Soft room tone ambiance, very subtle background air, gentle presence, neutral atmosphere, 15 seconds",
 }
 
-// detectAmbientSetting uses GPT to analyze text and identify the scene setting
-func detectAmbientSetting(bookPath string) (*AmbientSetting, error) {
+// detectAmbientSetting uses GPT to identify the scene setting from the supplied
+// page excerpt (Q1).
+func detectAmbientSetting(excerpt string) (*AmbientSetting, error) {
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
 		return nil, errors.New("OPENAI_API_KEY not set")
 	}
 
-	raw, err := os.ReadFile(bookPath)
-	if err != nil {
-		return nil, err
-	}
-	text := string(raw)
+	text := excerpt
 	if len(text) > 1000 {
 		text = text[:1000]
 	}
@@ -720,12 +771,13 @@ func generateAmbientSoundscape(setting *AmbientSetting, bookID uint) (string, er
 	return outPath, nil
 }
 
-// loopAmbientToLength loops the ambient clip to match TTS duration with fade in/out
-func loopAmbientToLength(ambientPath string, ttsDur float64, intensity float64, bookID uint, pageIndex int) (string, error) {
+// loopAmbientToLength loops the ambient clip to match TTS duration with fade
+// in/out. Output goes in the caller's per-job temp dir (B4).
+func loopAmbientToLength(ambientPath string, ttsDur float64, intensity float64, jobDir string) (string, error) {
 	// Volume based on intensity (very low: 0.08-0.18)
 	volume := 0.08 + (intensity * 0.10) // Maps 0.0-1.0 to 0.08-0.18
 
-	outPath := fmt.Sprintf("./audio/ambient_looped_%d_page_%d.ogg", bookID, pageIndex)
+	outPath := fmt.Sprintf("%s/ambient_looped.ogg", jobDir)
 
 	// Loop ambient, apply volume, add 1s fade in and 2s fade out
 	filterComplex := fmt.Sprintf(
@@ -774,18 +826,15 @@ var validFoleyEvents = map[string]bool{
 	"scream": true, "gasp": true, "whisper": true, "laughter": true,
 }
 
-// extractSoundEvents asks GPT to identify event types & timestamps.
-func extractSoundEvents(bookPath string, ttsDur float64) (EventMap, error) {
+// extractSoundEvents asks GPT to identify event types & timestamps from the
+// supplied page excerpt (Q1).
+func extractSoundEvents(excerpt string, ttsDur float64) (EventMap, error) {
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
 		return nil, errors.New("OPENAI_API_KEY not set")
 	}
 
-	raw, err := os.ReadFile(bookPath)
-	if err != nil {
-		return nil, err
-	}
-	sn := string(raw)
+	sn := excerpt
 	if len(sn) > 800 {
 		sn = sn[:800]
 	}
@@ -884,8 +933,11 @@ If no clear sound effects are described in the text, return: {}`, sn, ttsDur, st
 
 // getOrGenerateEffect returns (and caches) one short Foley clip per eventType.
 func getOrGenerateEffect(eventType string) (string, error) {
-	// Check cache first
-	if p, ok := effectCache[eventType]; ok {
+	// Check cache first (B5: guarded — accessed from concurrent goroutines).
+	effectCacheMu.RLock()
+	p, ok := effectCache[eventType]
+	effectCacheMu.RUnlock()
+	if ok {
 		log.Printf("🔄 [Foley Cache] Using cached effect for: %s", eventType)
 		return p, nil
 	}
@@ -922,7 +974,9 @@ func getOrGenerateEffect(eventType string) (string, error) {
 		return "", err
 	}
 
+	effectCacheMu.Lock()
 	effectCache[eventType] = path
+	effectCacheMu.Unlock()
 	return path, nil
 }
 
@@ -948,31 +1002,32 @@ func processSoundEffectsAndMerge(book Book, hash string, pageIndexes []int) {
 			continue
 		}
 
-		// Generate background music prompt
-		prompt, err := generateOverallSoundPrompt(book.FilePath)
+		// Generate background music prompt from THIS page's text (Q1).
+		prompt, err := generateOverallSoundPrompt(chunk.Content)
 		if err != nil {
 			log.Printf("prompt err for chunk index %d: %v", idx, err)
 			continue
 		}
 
-		bg, err := generateSoundEffect(prompt)
+		// Q3: reuse cached music for identical prompts instead of regenerating.
+		bg, err := getOrGenerateBackgroundMusic(prompt)
 		if err != nil {
 			log.Printf("music err for chunk index %d: %v", idx, err)
 			continue
 		}
 
-		log.Printf("🎶 Background music generated: %s", bg)
+		log.Printf("🎶 Background music ready: %s", bg)
 
-		// Mix audio
-		mixedPath, err := mergeAudio(chunk.AudioPath, bg, book, idx, book.FilePath, hash)
+		// Mix audio (Q1: pass the page text for mood/ambient analysis).
+		mixedPath, err := mergeAudio(chunk.AudioPath, bg, book, idx, chunk.Content, hash)
 		if err != nil {
 			log.Printf("mergeAudio err for page index %d: %v", idx, err)
 			continue
 		}
 
-		// Extract & overlay sound effects
+		// Extract & overlay sound effects (Q1: this page's text).
 		ttsDur, _ := getTTSDuration(chunk.AudioPath)
-		events, err := extractSoundEvents(book.FilePath, ttsDur)
+		events, err := extractSoundEvents(chunk.Content, ttsDur)
 		if err == nil {
 			fxPath, err := overlaySoundEvents(mixedPath, events, book, idx)
 			if err != nil {
@@ -992,9 +1047,7 @@ func processSoundEffectsAndMerge(book Book, hash string, pageIndexes []int) {
 		} else {
 			log.Printf("✅ Updated final_audio_path for book_id=%d page=%d → %s", book.ID, idx, mixedPath)
 		}
-
-		// Optional: delete temporary audio files here if needed
-		cleanupTempFiles(uint(book.ID))
+		// Temp files are cleaned up per-job inside mergeAudio (B4).
 	}
 }
 
@@ -1002,7 +1055,7 @@ func processSoundEffectsAndMerge(book Book, hash string, pageIndexes []int) {
 // Volume reduced from 0.45 to 0.30, with 0.05s fade in and 0.1s fade out for smoother blending
 func overlaySoundEvents(baseMix string, events EventMap, book Book, pageIndex int) (string, error) {
 	safeTitle := strings.ReplaceAll(strings.ToLower(book.Title), " ", "_")
-	hashSuffix := book.ContentHash[:8]
+	hashSuffix := shortHash(book.ContentHash)
 	outFile := fmt.Sprintf("./audio/final_with_fx_%s_%d_page_%d_%s.ogg", safeTitle, book.ID, pageIndex, hashSuffix)
 
 	// If no events, just return the base mix
@@ -1023,16 +1076,21 @@ func overlaySoundEvents(baseMix string, events EventMap, book Book, pageIndex in
 			continue
 		}
 		args = append(args, "-i", clip)
+		// Q2: the fade-out must start near the END of the clip, not at t=0.
+		// Compute the clip's real duration; if too short to fade, skip fade-out.
+		clipDur, _ := getTTSDuration(clip)
+		fade := "afade=t=in:d=0.05"
+		if clipDur > 0.15 {
+			fade += fmt.Sprintf(",afade=t=out:st=%.2f:d=0.1", clipDur-0.1)
+		}
 		for j, t := range times {
 			delayMs := int(t * 1000)
 			inLbl := fmt.Sprintf("[%d:a]", inputIdx)
 			outLbl := fmt.Sprintf("[e%d_%d]", inputIdx, j)
-			// Reduced volume (0.30), added fade in (0.05s) and fade out (0.1s) for smoother blending
-			// afade:t=in:d=0.05 - quick fade in to avoid click
-			// afade:t=out:st=0:d=0.1 - gentle fade out (starts at end of effect)
+			// Reduced volume (0.30), 0.05s fade-in, 0.1s fade-out at clip end.
 			filters = append(filters, fmt.Sprintf(
-				"%safade=t=in:d=0.05,afade=t=out:st=0:d=0.1,adelay=%d|%d,volume=0.30%s",
-				inLbl, delayMs, delayMs, outLbl,
+				"%s%s,adelay=%d|%d,volume=0.30%s",
+				inLbl, fade, delayMs, delayMs, outLbl,
 			))
 			labels = append(labels, outLbl)
 			totalEffects++
@@ -1062,26 +1120,16 @@ func overlaySoundEvents(baseMix string, events EventMap, book Book, pageIndex in
 	return outFile, nil
 }
 
-// cleanupTempFiles removes all temporary audio processing files
-func cleanupTempFiles(_ uint) {
-	// Clean up dynamic segment files
-	patterns := []string{
-		"dyn_seg_*.ogg",
-		"dyn_crossfade_*.ogg",
-		"./audio/ambient_looped_*.ogg",
+// shortHash returns the first 8 chars of a hash, or the whole string if it is
+// shorter — guards against panics on empty/short ContentHash (Q9).
+func shortHash(h string) string {
+	if len(h) >= 8 {
+		return h[:8]
 	}
-
-	for _, pattern := range patterns {
-		matches, _ := filepath.Glob(pattern)
-		for _, file := range matches {
-			if err := os.Remove(file); err == nil {
-				log.Printf("🧹 [Cleanup] Removed temp file: %s", file)
-			}
-		}
+	if h == "" {
+		return "nohash"
 	}
-
-	// Remove temp list file
-	os.Remove("dyn_list.txt")
+	return h
 }
 
 // adding helper function for file existence check

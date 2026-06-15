@@ -96,9 +96,26 @@ func extractUserIDFromClaims(claims any) uint {
 	return 0
 }
 
+// recoverStuckPipeline requeues/clears work that was left mid-flight by a crash
+// or restart, so nothing is stranded in 'processing' forever (Q6). Runs once at
+// startup before the worker loop.
+func recoverStuckPipeline() {
+	if r := db.Model(&TTSQueueJob{}).Where("status = ?", "processing").Update("status", "queued"); r.Error == nil && r.RowsAffected > 0 {
+		log.Printf("♻️ recovered %d TTS job(s) stuck in 'processing' → 'queued'", r.RowsAffected)
+	}
+	if r := db.Model(&BookChunk{}).Where("tts_status = ?", "processing").Update("tts_status", "failed"); r.Error == nil && r.RowsAffected > 0 {
+		log.Printf("♻️ reset %d chunk(s) stuck in 'processing' → 'failed'", r.RowsAffected)
+	}
+	if r := db.Model(&Book{}).Where("status = ?", "processing").Update("status", "pending"); r.Error == nil && r.RowsAffected > 0 {
+		log.Printf("♻️ reset %d book(s) stuck in 'processing' → 'pending'", r.RowsAffected)
+	}
+}
+
 func startTTSWorker() {
 	once.Do(func() {
 		go func() {
+			// Clear anything stranded by a previous crash before we start.
+			recoverStuckPipeline()
 			for {
 				var job TTSQueueJob
 				res := db.
@@ -118,11 +135,12 @@ func startTTSWorker() {
 					continue
 				}
 
-				// Mark it in-flight
-				if err := db.Model(&job).Update("status", "processing").Error; err != nil {
-					log.Printf("❌ failed to mark job #%d processing: %v", job.ID, err)
-					// skip processing this one for now
-					time.Sleep(5 * time.Second)
+				// Atomically claim the job (guard against re-processing).
+				claim := db.Model(&TTSQueueJob{}).
+					Where("id = ? AND status = ?", job.ID, "queued").
+					Update("status", "processing")
+				if claim.Error != nil || claim.RowsAffected == 0 {
+					time.Sleep(2 * time.Second)
 					continue
 				}
 

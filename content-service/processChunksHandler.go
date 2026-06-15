@@ -99,9 +99,8 @@ func ProcessChunksTTSHandler(c *gin.Context) {
 		}
 	}
 
-	// Attempt to merge (optional)
-	errs := processMergedChunks(req.BookID)
-	if err != nil {
+	// Attempt to merge (optional). Q7: check the error we actually returned.
+	if errs := processMergedChunks(req.BookID); errs != nil {
 		log.Printf("merge processing failed: %v", errs)
 	}
 

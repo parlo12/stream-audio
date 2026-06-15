@@ -47,14 +47,11 @@ func summarizeBookText(bookText string) string {
 	return bookText
 }
 
-// generateOverallSoundPrompt reads the book file, summarizes it, and asks GPT to generate
-// a concise (<=300 chars) background music prompt.
-func generateOverallSoundPrompt(bookFilePath string) (string, error) {
-	data, err := os.ReadFile(bookFilePath)
-	if err != nil {
-		return "", fmt.Errorf("read book file: %w", err)
-	}
-	excerpt := summarizeBookText(string(data))
+// generateOverallSoundPrompt summarizes the supplied page text and asks GPT to
+// generate a concise (<=300 chars) background music prompt. Q1: callers pass the
+// chunk's own content so each page's music reflects that page, not page 1.
+func generateOverallSoundPrompt(pageText string) (string, error) {
+	excerpt := summarizeBookText(pageText)
 
 	userContent := fmt.Sprintf(
 		"Analyze this audiobook excerpt and produce a concise (max 300 chars) background music prompt recommending instrumentation, mood, and style: %s",

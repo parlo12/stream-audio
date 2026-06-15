@@ -395,9 +395,15 @@ func mergeAudioSegments(segmentPaths []string, outputPath string) error {
 		return os.WriteFile(outputPath, input, 0644)
 	}
 
-	// Create a file list for FFmpeg concat
-	// The list file will be in the same directory as segments, so use just filenames
-	listPath := "./audio/concat_list.txt"
+	// Create a file list for FFmpeg concat. Use a unique name in ./audio (the
+	// concat list resolves entries relative to its own dir) so concurrent
+	// merges don't clobber a shared list (B4).
+	listFile, err := os.CreateTemp("./audio", "concat_list_*.txt")
+	if err != nil {
+		return fmt.Errorf("create concat list: %w", err)
+	}
+	listPath := listFile.Name()
+	listFile.Close()
 	var listContent strings.Builder
 	for _, path := range segmentPaths {
 		// Extract just the filename since concat list is relative to its location
@@ -629,9 +635,19 @@ func processBookConversion(book Book) {
 		return
 	}
 
-	// 6) Launch sound effects and merging in the background
-	log.Printf("🚀 Launching effects merge with hash: %s for book ID %d", book.ContentHash, book.ID)
-	go processSoundEffectsAndMerge(book, book.ContentHash, nil)
+	// 6) Launch sound effects and merging in the background.
+	// Q9: pass the book's actual chunk indexes — passing nil made this a no-op
+	// (the loop never ran), so effects/music were never applied.
+	var idxRows []BookChunk
+	if err := db.Where("book_id = ?", book.ID).Order("\"index\" ASC").Find(&idxRows).Error; err != nil {
+		log.Printf("⚠️ could not load chunk indexes for book %d: %v", book.ID, err)
+	}
+	pageIndexes := make([]int, 0, len(idxRows))
+	for _, ch := range idxRows {
+		pageIndexes = append(pageIndexes, ch.Index)
+	}
+	log.Printf("🚀 Launching effects merge with hash: %s for book ID %d (%d pages)", book.ContentHash, book.ID, len(pageIndexes))
+	go processSoundEffectsAndMerge(book, book.ContentHash, pageIndexes)
 }
 
 // updateBookStatus updates the status of a book in the database.

@@ -103,19 +103,19 @@ Exploitable holes closed this pass (S6/S7/Q11/B2); admin/restore lifecycle (S5/S
 16. **Redesign restore-account** (S5): **deferred** — stays disabled (410). Revisit when social restore is needed.
 17. ~~**Cascade book deletion** (Q11)~~ ✅ — `deleteBookHandler` transactionally deletes chunks/progress/processed-groups/jobs + disk files; `resetBookContent` clears chunks/groups on re-upload.
 
-### Phase 3 — Pipeline integrity (3–5 days, prerequisite for the worker-fleet migration)
+### Phase 3 — Pipeline integrity ✅ DONE (June 15, 2026) — except Q4 (left as-is)
 
-18. **Per-job temp dirs** (B4): every mix/transcode job gets `os.MkdirTemp("", "narrafied-job-*")`, all intermediate paths derive from it, cleanup = `os.RemoveAll(jobDir)` in a defer. Delete the glob-based `cleanupTempFiles`.
-19. **Mutex (or `sync.Map`) around `effectCache`** (B5); same for any other shared maps introduced later.
-20. **Job locking + status state machine** (B6, Q6): an atomic `UPDATE books SET status='processing' WHERE id=? AND status NOT IN ('processing')`-style guard so a book can't be double-transcribed; every failure path sets `failed`; a startup sweep re-queues jobs stuck in `processing`.
-21. **Free-tier enforcement inside the loop** (B6): re-check (cheaply, from the claim/DB, not an HTTP call) every N pages; stop at the tier's page cap. This is the seed of the quota system in the architecture plan.
-22. **Per-page analysis context** (Q1): pass `chunk.Content` to mood/ambient/Foley/music-prompt functions instead of `book.FilePath`.
-23. **Fix the Foley fade** (Q2): fade-out must start at `effect_duration - 0.1`, not 0 — compute per-clip duration via ffprobe or drop the fade-out.
-24. **Cache music per (book, mood-profile)** (Q3) the way Foley clips are cached; key by prompt hash, store alongside audio.
-25. **Mix levels** (Q5): explicit `weights` on amix (TTS 1.0 / music 0.3 / ambient 0.15-ish) instead of default averaging.
-26. **Restore the multi-voice toggle** (Q4): implement the documented `ENABLE_MULTIVOICE` env check in `convertTextToAudio`, defaulting OFF for free tier (cost) and ON for paid — or per-book user choice.
-27. **Small correctness sweep**: Q7 (check the right error), Q8 (audio_url off-by-one), Q9 (nil-pageIndexes no-op + hash[:8] guard), Q12 (use batch insert in async path), EPUB HTML stripping + real `cleanUTF8` (Q10).
-28. **Tests lock it in**: table-driven tests for ownership middleware, the restore query, page-index conversion, free-tier gate, and a temp-dir concurrency test that runs two mixes in parallel. These are the regression-prone spots just fixed; they're cheap to test and expensive to re-break.
+18. ~~**Per-job temp dirs** (B4)~~ ✅ — `mergeAudio` creates `os.MkdirTemp("", "narrafied-mix-*")`, dyn-seg/crossfade/final-bg/ambient-loop all derive from it with `defer RemoveAll`; concat list + music files are now unique; glob-based `cleanupTempFiles` deleted.
+19. ~~**Mutex around `effectCache`** (B5)~~ ✅ — `effectCacheMu sync.RWMutex` (and a new `musicCacheMu` for Q3). `-race` test added.
+20. ~~**Job locking + status state machine** (B6, Q6)~~ ✅ — atomic book claim (`status <> 'processing'`, 409 on duplicate); per-chunk atomic claim; every failure path sets `tts_status='failed'`; book lock released to `completed`/`pending`; `recoverStuckPipeline` startup sweep requeues stuck jobs/chunks/books.
+21. ~~**Free-tier enforcement inside the loop** (B6)~~ ✅ — `FREE_TIER_PAGE_LIMIT` (default 1) re-checked via local DB count inside the batch loop; stops at cap.
+22. ~~**Per-page analysis context** (Q1)~~ ✅ — `chunk.Content` threaded into segment/ambient/Foley/music-prompt functions (signatures take the excerpt now).
+23. ~~**Foley fade** (Q2)~~ ✅ — fade-out starts at `clipDur-0.1` (ffprobe), skipped if clip <0.15 s.
+24. ~~**Cache music** (Q3)~~ ✅ — `getOrGenerateBackgroundMusic` caches by prompt hash (also gives unique filenames for B4).
+25. ~~**Mix levels** (Q5)~~ ✅ — explicit `amix … normalize=0:weights=1.0 0.3[ 0.15]`.
+26. **Multi-voice toggle** (Q4): **skipped — left always-on per product decision.** Revisit with the account_type-in-claims work.
+27. ~~**Correctness sweep**~~ ✅ — Q7 (right error var), Q8 (`audio_url` uses `Index+1`), Q9 (real pageIndexes + `shortHash` guard), Q12 (async uses `ChunkDocumentBatch`), Q10 (EPUB `stripHTML` + real `cleanUTF8`).
+28. ~~**Tests**~~ ✅ — `pipeline_test.go`: `shortHash`, `stripHTML`, `cleanUTF8`, `effectCache` `-race`; plus existing `upload_path_test.go`.
 
 ### Phase 4 — Payments & lifecycle correctness (1–2 days)
 
@@ -149,7 +149,7 @@ With the above done, start [structureImprovmentPlan.md](structureImprovmentPlan.
 1. ~~Ports/static/secrets/logging/user_id/restore-off/push repos~~ → **Phase 0, do today.**
 2. ~~Social-login verification + signing-method pin~~ → **Phase 1 ✅** (shared-package extraction deferred to Phase 5).
 3. ~~Ownership middleware + upload hardening + cascade delete + admin column fix~~ → **Phase 2 ✅** (restore redesign S5 + admin audit/wipe S10 deferred).
-4. Temp dirs, locks, per-page context, Foley fade, caching, toggle, tests → **Phase 3.**
+4. ~~Temp dirs, locks, per-page context, Foley fade, caching, tests~~ → **Phase 3 ✅** (multi-voice toggle Q4 left always-on per product decision).
 5. Stripe line-items + webhook coverage + pricing reconciliation → **Phase 4.**
 6. Package split, migrations, gateway hardening, Keychain, docs → **Phase 5 (parallelizable).**
 7. Begin the storage/queue/presigned/quota migration → **Phase 6 / other doc.**
