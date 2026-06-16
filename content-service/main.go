@@ -238,6 +238,9 @@ func main() {
 		authorized.GET("/books/:book_id/pages/:page/audio", requireBookOwnership(), streamSinglePageAudioHandler)
 		// HLS playlist for a page (Phase 5C) — segments served direct from R2.
 		authorized.GET("/books/:book_id/pages/:page/hls.m3u8", requireBookOwnership(), serveHLSHandler)
+		// HEAD probe (client decides HLS vs MP3). Gin won't serve HEAD on the GET
+		// route, so register it explicitly or HLS is never used on-device.
+		authorized.HEAD("/books/:book_id/pages/:page/hls.m3u8", requireBookOwnership(), headHLSHandler)
 
 		// Book search/discovery endpoint - AI-powered book suggestions
 		authorized.POST("/search-books", SearchBooksHandler)

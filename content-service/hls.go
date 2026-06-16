@@ -102,6 +102,22 @@ func serveHLSHandler(c *gin.Context) {
 	c.String(http.StatusOK, b.String())
 }
 
+// headHLSHandler answers HEAD /user/books/:book_id/pages/:page/hls.m3u8 — the
+// client probes this to decide HLS vs the per-page MP3. Gin doesn't serve HEAD
+// on a GET route, so without this the probe always 404s and HLS is never used.
+// Cheap: just checks whether the playlist key is set (no R2 round-trip).
+func headHLSHandler(c *gin.Context) {
+	bookID, _ := strconv.Atoi(c.Param("book_id"))
+	pageIndex, _ := strconv.Atoi(c.Param("page"))
+	var chunk BookChunk
+	if err := db.Where("book_id = ? AND \"index\" = ?", bookID, pageIndex-1).First(&chunk).Error; err != nil || chunk.HLSPath == "" {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	c.Header("Content-Type", "application/vnd.apple.mpegurl")
+	c.Status(http.StatusOK)
+}
+
 func keyDir(key string) string {
 	if i := strings.LastIndex(key, "/"); i >= 0 {
 		return key[:i+1]
