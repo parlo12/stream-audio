@@ -12,3 +12,6 @@ logs/
 auth-service/auth-service
 gateway/gateway.git
 content-service/content-service
+
+# Deploy secrets mounted into containers (APNs .p8, etc.) — never commit
+secrets/

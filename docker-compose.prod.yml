@@ -104,6 +104,7 @@ services:
       - content-covers-persistent:/app/uploads/covers
       - content-uploads:/app/uploads
       - ./logs/content:/app/logs
+      - ./secrets:/secrets:ro   # APNs .p8 etc. (gitignored; not in env)
     logging:
       driver: "json-file"
       options:
@@ -131,6 +132,7 @@ services:
       - content-covers-persistent:/app/uploads/covers
       - content-uploads:/app/uploads
       - ./logs/worker:/app/logs
+      - ./secrets:/secrets:ro   # APNs .p8 etc. (gitignored; not in env)
     logging:
       driver: "json-file"
       options:
