@@ -170,7 +170,7 @@ services:
       options: { max-size: "10m", max-file: "3" }
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.2.0
     restart: always
     environment:
       GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
