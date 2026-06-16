@@ -19,6 +19,19 @@ Applied June 15, 2026 (Phase 5):
    before; it now proxies + is rate-limited).
 4. `client_max_body_size 500M` retained (audiobook uploads).
 
+Added June 16, 2026:
+
+5. **Content-service `/user/*` exceptions.** `/user/` falls through to auth
+   (`8082`) by default; content-service `/user/*` endpoints each need their own
+   `location` → `8083`, or they 404 on auth. Existing: `/user/books`,
+   `/user/chunks`, `/user/progress`, `/user/search-books`, `/user/stats/`,
+   `/user/search-book-covers`. **Added** `/user/device-token` (APNs registration)
+   and `/user/bug-report` (in-app bug reports) → `localhost:8083`.
+   ⚠️ Any NEW content-service route under `/user/` must get an nginx location
+   block here too, or it will 404 (it hits auth-service instead).
+6. **`/admin/grafana/`** → `localhost:3000` (Grafana, sub-path) and
+   **`/admin/queues/`** → `localhost:8085` (asynqmon), both behind admin auth.
+
 ## Verified
 - `/health` → 200; `X-Request-ID` present on responses.
 - 10 rapid `POST /login` → 6× 401 then 4× 429 (burst then throttle).
