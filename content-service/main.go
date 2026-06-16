@@ -204,6 +204,9 @@ func main() {
 		// Register this device's APNs token for push notifications.
 		authorized.POST("/device-token", RegisterDeviceTokenHandler)
 
+		// User-submitted bug/problem report from the app.
+		authorized.POST("/bug-report", SubmitBugReportHandler)
+
 		authorized.POST("/books/:book_id/cover", requireBookOwnership(), uploadBookCoverHandler)
 
 		// Create a new book
@@ -275,6 +278,7 @@ func main() {
 		admin.DELETE("/users/:user_id/files", deleteUserFilesContentHandler)
 		admin.DELETE("/files", deleteFileContentHandler)
 		admin.GET("/files/tree", getFileTreeContentHandler)
+		admin.GET("/bug-reports", ListBugReportsHandler)
 	}
 
 	for _, r := range router.Routes() {
@@ -324,7 +328,7 @@ func setupDatabase() {
 	// Only the API owns schema migrations. Workers skip AutoMigrate so a
 	// co-deploy doesn't race two concurrent CREATE TABLEs (Postgres DDL race).
 	if getEnv("RUN_MODE", "both") != "worker" {
-		if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}, &PlaybackProgress{}, &TranscriptionBatch{}, &PlanLimit{}, &UsageEvent{}, &DeviceToken{}); err != nil {
+		if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}, &PlaybackProgress{}, &TranscriptionBatch{}, &PlanLimit{}, &UsageEvent{}, &DeviceToken{}, &BugReport{}); err != nil {
 			log.Fatalf("AutoMigrate failed: %v", err)
 		}
 		seedPlanLimits()
