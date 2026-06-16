@@ -138,6 +138,10 @@ func main() {
 		log.Fatalf("FATAL: queue client init failed: %v", err)
 	}
 
+	// APNs push (token-based). No-op if unconfigured. Needed in every mode:
+	// the worker sends pushes; the API registers device tokens.
+	initAPNs()
+
 	// RUN_MODE selects the role: api (HTTP only), worker (asynq consumer only),
 	// or both (default — local dev).
 	mode := getEnv("RUN_MODE", "both")
@@ -197,6 +201,9 @@ func main() {
 		// by requireBookOwnership() so a user can only act on their own books.
 		// Routes that take book_id in the body/form (upload, /chunks/tts,
 		// /chunks/audio-by-id) verify ownership inline in their handlers.
+		// Register this device's APNs token for push notifications.
+		authorized.POST("/device-token", RegisterDeviceTokenHandler)
+
 		authorized.POST("/books/:book_id/cover", requireBookOwnership(), uploadBookCoverHandler)
 
 		// Create a new book
@@ -317,7 +324,7 @@ func setupDatabase() {
 	// Only the API owns schema migrations. Workers skip AutoMigrate so a
 	// co-deploy doesn't race two concurrent CREATE TABLEs (Postgres DDL race).
 	if getEnv("RUN_MODE", "both") != "worker" {
-		if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}, &PlaybackProgress{}, &TranscriptionBatch{}, &PlanLimit{}, &UsageEvent{}); err != nil {
+		if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}, &PlaybackProgress{}, &TranscriptionBatch{}, &PlanLimit{}, &UsageEvent{}, &DeviceToken{}); err != nil {
 			log.Fatalf("AutoMigrate failed: %v", err)
 		}
 		seedPlanLimits()

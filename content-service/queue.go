@@ -321,6 +321,20 @@ func handleTranscribeBatch(ctx context.Context, t *asynq.Task) error {
 	db.Model(&BookChunk{}).Where("book_id = ? AND tts_status = ?", p.BookID, "completed").Count(&ready)
 	publishPagesReady(book, int(ready))
 
+	// Push notification (best-effort, non-blocking). One message per batch, no
+	// double-fire: fully done → "complete"; first batch → "ready to play";
+	// otherwise → "more pages ready".
+	var notDone int64
+	db.Model(&BookChunk{}).Where("book_id = ? AND tts_status <> ?", p.BookID, "completed").Count(&notDone)
+	switch {
+	case notDone == 0:
+		notifyBookCompleted(book)
+	case p.StartPage == 0:
+		notifyAudiobookReady(book)
+	default:
+		notifyBatchReady(book, int(ready))
+	}
+
 	// Auto-enqueue the next batch if there's more to do (and not quota-capped).
 	var pendingBeyond int64
 	db.Model(&BookChunk{}).Where("book_id = ? AND \"index\" > ? AND tts_status <> ?", p.BookID, p.EndPage, "completed").Count(&pendingBeyond)
@@ -380,6 +394,7 @@ func handleFetchCover(ctx context.Context, t *asynq.Task) error {
 	if err := db.First(&book, p.BookID).Error; err == nil {
 		payload, _ := json.Marshal(map[string]interface{}{"book_id": book.ID, "cover_url": publicURL, "timestamp": time.Now().UTC().Format(time.RFC3339)})
 		PublishEvent(fmt.Sprintf("users/%d/cover_uploaded", book.UserID), payload)
+		notifyCoverReady(book)
 	}
 	return nil
 }
