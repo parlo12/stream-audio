@@ -183,24 +183,34 @@ func SelectBookCoverHandler(c *gin.Context) {
 
 	log.Printf("📥 Downloading selected cover for book %s: %s", bookID, req.CoverURL)
 
-	// Download and save the selected cover
+	// Download the chosen image. Some sources (Google Books content URLs, certain
+	// CDNs) block server-side fetches (403/400). The cover is optional, so a
+	// failure here is a soft 422 the client can surface as "pick another or skip"
+	// — never a hard 500 that blocks the upload flow.
 	localPath, err := downloadAndSaveImage(req.CoverURL, bookID)
 	if err != nil {
-		log.Printf("❌ Failed to download cover: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "Failed to download cover",
-			"details": err.Error(),
+		log.Printf("⚠️ Could not download selected cover: %v", err)
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "cover_unavailable",
+			"message": "That image couldn't be fetched. Pick a different cover or skip — you can add one later.",
 		})
 		return
 	}
 
-	// Generate public URL
-	host := getEnv("STREAM_HOST", "https://narrafied.com")
-	filename := localPath[strings.LastIndex(localPath, "/")+1:]
-	publicURL := fmt.Sprintf("%s/covers/%s", host, filename)
+	// Covers live in R2 post-migration: upload the downloaded file and store the
+	// object key + public URL (mirrors the automatic cover-fetch path).
+	key, publicURL, err := storeCover(localPath, bookID)
+	if err != nil {
+		log.Printf("❌ Failed to store selected cover in R2 for book %s: %v", bookID, err)
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "cover_store_failed",
+			"message": "Couldn't save that cover. Please try again.",
+		})
+		return
+	}
 
 	// Update book record
-	book.CoverPath = localPath
+	book.CoverPath = key
 	book.CoverURL = publicURL
 	if err := db.Save(&book).Error; err != nil {
 		log.Printf("❌ Failed to update book cover: %v", err)
@@ -212,7 +222,7 @@ func SelectBookCoverHandler(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":    "Cover saved successfully",
-		"cover_path": localPath,
+		"cover_path": key,
 		"cover_url":  publicURL,
 	})
 }
