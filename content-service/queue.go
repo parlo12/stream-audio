@@ -165,6 +165,9 @@ func enqueueMergeChunks(bookID uint) error {
 }
 
 func enqueueHLSPackage(bookID uint, pageIndex int) error {
+	if qClient == nil {
+		return fmt.Errorf("queue client not initialized")
+	}
 	b, _ := json.Marshal(TaskHLSPackage{BookID: bookID, PageIndex: pageIndex})
 	_, err := qClient.Enqueue(asynq.NewTask(TypeHLSPackage, b),
 		asynq.MaxRetry(3), asynq.Timeout(10*time.Minute), asynq.Queue("default"))

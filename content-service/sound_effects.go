@@ -1062,6 +1062,12 @@ func processSoundEffectsAndMerge(book Book, hash string, pageIndexes []int) {
 			log.Printf("❌ Failed to update final_audio_path for book_id=%d page=%d: %v", book.ID, idx, err)
 		} else {
 			log.Printf("✅ Updated final_audio_path for book_id=%d page=%d → %s", book.ID, idx, key)
+			// Follow-on: package this page as HLS (non-blocking) so the legacy
+			// play path (/user/chunks/tts → here) gets HLS too, matching the
+			// asynq batch path (transcribePage). The worker consumes the task.
+			if err := enqueueHLSPackage(book.ID, idx); err != nil {
+				log.Printf("⚠️ failed to enqueue HLS for book %d page %d: %v", book.ID, idx, err)
+			}
 		}
 		// Temp files are cleaned up per-job inside mergeAudio (B4).
 	}
