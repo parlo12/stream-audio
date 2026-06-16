@@ -60,17 +60,17 @@ func ProcessChunksTTSHandler(c *gin.Context) {
 		return
 	}
 
-	// Ensure no chunk has been processed yet
-	for _, ch := range chunks {
-		if ch.TTSStatus == "completed" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "One or more pages already processed"})
-			return
-		}
-	}
-
-	// Process each chunk
+	// Process each chunk. Already-completed pages are a no-op success (look-ahead
+	// may have finished them), not an error.
 	var audioPaths []string
+	maxIndex := -1
 	for _, chunk := range chunks {
+		if chunk.Index > maxIndex {
+			maxIndex = chunk.Index
+		}
+		if chunk.TTSStatus == "completed" {
+			continue
+		}
 		pageIndex := chunk.Index + 1 // Convert to 1-based index for user-friendly messages
 		db.Model(&chunk).Update("TTSStatus", "processing")
 		audioPath, err := convertTextToAudio(chunk.Content, chunk.ID)
@@ -100,8 +100,15 @@ func ProcessChunksTTSHandler(c *gin.Context) {
 		log.Printf("merge processing failed: %v", errs)
 	}
 
+	// Look-ahead: transcribe + HLS-package the next pages so HLS is ready before
+	// the listener advances (makes HLS the primary playback path, not MP3
+	// fallback). Bounded by LOOKAHEAD_PAGES; also re-triggered as progress moves.
+	if maxIndex >= 0 {
+		_ = enqueueLookAhead(req.BookID, maxIndex+1, lookAheadPages(), getUserIDFromContext(c), accountType)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"message":     "TTS processing complete",
+		"message":     "TTS processing started",
 		"audio_paths": audioPaths,
 	})
 

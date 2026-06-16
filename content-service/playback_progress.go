@@ -165,6 +165,10 @@ func UpdatePlaybackProgressHandler(c *gin.Context) {
 	// next transcription batch (Phase 4 pause-ahead resume).
 	maybeResumeTranscription(accountTypeFromClaims(c), book.ID, progress.ChunkIndex)
 
+	// Keep look-ahead transcription + HLS packaging just ahead of the listener so
+	// HLS stays the primary playback path as they advance page to page.
+	_ = enqueueLookAhead(book.ID, progress.ChunkIndex+1, lookAheadPages(), getUserIDFromContext(c), accountTypeFromClaims(c))
+
 	// 8. Return updated progress
 	c.JSON(http.StatusOK, ProgressResponse{
 		BookID:            progress.BookID,

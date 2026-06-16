@@ -148,3 +148,8 @@ func quota429(c *gin.Context, d QuotaDecision) {
 }
 
 func pauseAheadPages() int { return envInt("PAUSE_AHEAD_PAGES", 60) }
+
+// lookAheadPages is how many pages ahead of the listener to pre-transcribe +
+// HLS-package so HLS is the primary playback path. Small by design (bounds cost
+// and worker load); re-triggered as playback progresses.
+func lookAheadPages() int { return envInt("LOOKAHEAD_PAGES", 3) }

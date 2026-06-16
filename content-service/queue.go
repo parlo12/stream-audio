@@ -58,6 +58,7 @@ const (
 	TypeFetchCover      = "cover:fetch"
 	TypeParseBook       = "book:parse"
 	TypeHLSPackage      = "hls:package"
+	TypeLookAhead       = "transcribe:lookahead"
 )
 
 const batchSizePages = 20
@@ -87,6 +88,17 @@ type TaskParseBook struct {
 type TaskHLSPackage struct {
 	BookID    uint `json:"book_id"`
 	PageIndex int  `json:"page_index"`
+}
+
+// TaskLookAhead asks the worker to transcribe + HLS-package a small window of
+// pages just ahead of the listener, so HLS is the primary playback path (ready
+// before the user arrives) rather than always falling back to per-page MP3.
+type TaskLookAhead struct {
+	BookID      uint   `json:"book_id"`
+	StartIndex  int    `json:"start_index"` // first chunk index (0-based) to ensure ready
+	Count       int    `json:"count"`       // how many pages ahead to cover
+	UserID      uint   `json:"user_id"`
+	AccountType string `json:"account_type"`
 }
 
 // TranscriptionBatch tracks progress of one 20-page transcription batch.
@@ -132,6 +144,7 @@ func startAsyncWorker() error {
 	mux.HandleFunc(TypeFetchCover, handleFetchCover)
 	mux.HandleFunc(TypeParseBook, handleParseBook)
 	mux.HandleFunc(TypeHLSPackage, handleHLSPackage)
+	mux.HandleFunc(TypeLookAhead, handleLookAhead)
 
 	// Reconciliation sweeper: catch uploads that were initiated but whose
 	// client died before confirming (R2 has no bucket-event webhooks).
@@ -171,6 +184,22 @@ func enqueueHLSPackage(bookID uint, pageIndex int) error {
 	b, _ := json.Marshal(TaskHLSPackage{BookID: bookID, PageIndex: pageIndex})
 	_, err := qClient.Enqueue(asynq.NewTask(TypeHLSPackage, b),
 		asynq.MaxRetry(3), asynq.Timeout(10*time.Minute), asynq.Queue("default"))
+	return err
+}
+
+// enqueueLookAhead schedules transcription + HLS packaging for `count` pages
+// starting at startIndex. Cheap to over-call: duplicate windows just find pages
+// already done (idempotent claim) and no-op.
+func enqueueLookAhead(bookID uint, startIndex, count int, userID uint, accountType string) error {
+	if qClient == nil || count <= 0 {
+		return nil
+	}
+	if startIndex < 0 {
+		startIndex = 0
+	}
+	b, _ := json.Marshal(TaskLookAhead{BookID: bookID, StartIndex: startIndex, Count: count, UserID: userID, AccountType: accountType})
+	_, err := qClient.Enqueue(asynq.NewTask(TypeLookAhead, b),
+		asynq.MaxRetry(2), asynq.Timeout(30*time.Minute), asynq.Queue("default"))
 	return err
 }
 
@@ -406,6 +435,71 @@ func handleHLSPackage(ctx context.Context, t *asynq.Task) error {
 	}
 	db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("hls_path", key)
 	log.Printf("🎞️ HLS packaged for book %d page %d → %s", p.BookID, p.PageIndex, key)
+	return nil
+}
+
+// handleLookAhead transcribes + HLS-packages a small window of pages ahead of
+// the listener so HLS (not the MP3 fallback) is what plays as they advance.
+func handleLookAhead(ctx context.Context, t *asynq.Task) error {
+	var p TaskLookAhead
+	if err := json.Unmarshal(t.Payload(), &p); err != nil {
+		return fmt.Errorf("bad payload: %v: %w", err, asynq.SkipRetry)
+	}
+	var book Book
+	if err := db.First(&book, p.BookID).Error; err != nil {
+		return err
+	}
+	endIndex := p.StartIndex + p.Count - 1
+	var chunks []BookChunk
+	db.Where("book_id = ? AND \"index\" BETWEEN ? AND ?", p.BookID, p.StartIndex, endIndex).
+		Order("\"index\" ASC").Find(&chunks)
+	for _, ch := range chunks {
+		if ch.TTSStatus == "completed" {
+			// Already transcribed — just make sure HLS is packaged.
+			if ch.HLSPath == "" {
+				if err := enqueueHLSPackage(p.BookID, ch.Index); err != nil {
+					log.Printf("⚠️ lookahead HLS enqueue book %d page %d: %v", p.BookID, ch.Index, err)
+				}
+			}
+			continue
+		}
+		if err := lookAheadTranscribeChunk(book, ch, p.UserID, p.AccountType); err != nil {
+			if errors.Is(err, errQuotaExceeded) {
+				log.Printf("🛑 lookahead quota reached for user %d book %d", p.UserID, p.BookID)
+				break
+			}
+			log.Printf("⚠️ lookahead page %d (book %d) failed: %v", ch.Index, p.BookID, err)
+		}
+	}
+	return nil
+}
+
+// lookAheadTranscribeChunk runs the SAME pipeline as the on-demand play path
+// (TTS → music + Foley merge → HLS) for one page, synchronously, so look-ahead
+// pages sound identical and are HLS-ready before the listener arrives. The
+// atomic claim makes it idempotent and safe to race with the play path.
+func lookAheadTranscribeChunk(book Book, chunk BookChunk, userID uint, accountType string) error {
+	claim := db.Model(&BookChunk{}).
+		Where("id = ? AND tts_status NOT IN ?", chunk.ID, []string{"processing", "completed"}).
+		Update("tts_status", "processing")
+	if claim.RowsAffected == 0 {
+		return nil // already done or in-flight elsewhere
+	}
+	if d := checkAndConsume(userID, accountType, "transcribe_pages", 1, book.ID); !d.Allowed {
+		db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "pending")
+		return errQuotaExceeded
+	}
+	audioPath, err := convertTextToAudio(chunk.Content, chunk.ID)
+	if err != nil {
+		db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "failed")
+		return err
+	}
+	db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Updates(map[string]interface{}{
+		"audio_path": audioPath,
+		"tts_status": "completed",
+	})
+	// Synchronous merge (worker job owns it): sets final_audio_path + enqueues HLS.
+	processSoundEffectsAndMerge(book, book.ContentHash, []int{chunk.Index})
 	return nil
 }
 
