@@ -112,7 +112,11 @@ func ChunkDocumentAsync(bookID uint, filePath string) (estimatedChunks int, err 
 		actualChunks, err := ChunkDocumentBatch(bookID, filePath)
 		if err != nil {
 			log.Printf("❌ Async chunking failed for book %d: %v", bookID, err)
-			db.Model(&Book{}).Where("id = ?", bookID).Update("status", "chunking_failed")
+			status := "chunking_failed"
+			if errors.Is(err, errNoTextExtracted) {
+				status = "no_text_extracted" // likely a scanned/image PDF
+			}
+			db.Model(&Book{}).Where("id = ?", bookID).Update("status", status)
 			return
 		}
 
@@ -122,6 +126,12 @@ func ChunkDocumentAsync(bookID uint, filePath string) (estimatedChunks int, err 
 
 	return estimatedChunks, nil
 }
+
+// errNoTextExtracted is returned when a source file parses but yields no text
+// (e.g. a scanned/image-only PDF with no embedded text layer — we don't OCR).
+// Callers map this to a distinct "no_text_extracted" book status so the client
+// can show a tailored message instead of a generic failure.
+var errNoTextExtracted = errors.New("no text content extracted from file")
 
 // ChunkDocumentBatch uses batch inserts for better performance on large books
 func ChunkDocumentBatch(bookID uint, filePath string) (int, error) {
@@ -134,7 +144,7 @@ func ChunkDocumentBatch(bookID uint, filePath string) (int, error) {
 	}
 
 	if len(text) == 0 {
-		return 0, fmt.Errorf("no text content extracted from file")
+		return 0, errNoTextExtracted
 	}
 
 	// Update Book.Content

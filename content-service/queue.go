@@ -367,6 +367,13 @@ func handleParseBook(ctx context.Context, t *asynq.Task) error {
 	resetBookContent(p.BookID) // idempotent: clear any prior chunks on re-parse
 	pages, err := ChunkDocumentBatch(p.BookID, book.FilePath)
 	if err != nil {
+		// Distinguish "no extractable text" (likely a scanned/image PDF) so the
+		// client can show a tailored message; SkipRetry since retrying the same
+		// textless file will never succeed.
+		if errors.Is(err, errNoTextExtracted) {
+			db.Model(&Book{}).Where("id = ?", p.BookID).Update("status", "no_text_extracted")
+			return fmt.Errorf("%w: %v", asynq.SkipRetry, err)
+		}
 		db.Model(&Book{}).Where("id = ?", p.BookID).Update("status", "chunking_failed")
 		return err
 	}
