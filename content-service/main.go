@@ -207,6 +207,12 @@ func main() {
 		// User-submitted bug/problem report from the app.
 		authorized.POST("/bug-report", SubmitBugReportHandler)
 
+		// Remote config: feature flags, copy, colors, displayed pricing, and the
+		// min-supported-build version gate. Resolved per-tier from the JWT
+		// account_type claim; editable live via SQL (no redeploy). NOTE: needs an
+		// explicit nginx `location /user/config` → 8083 or it 404s (auth-service).
+		authorized.GET("/config", getUserConfigHandler)
+
 		authorized.POST("/books/:book_id/cover", requireBookOwnership(), uploadBookCoverHandler)
 
 		// Create a new book
@@ -328,10 +334,11 @@ func setupDatabase() {
 	// Only the API owns schema migrations. Workers skip AutoMigrate so a
 	// co-deploy doesn't race two concurrent CREATE TABLEs (Postgres DDL race).
 	if getEnv("RUN_MODE", "both") != "worker" {
-		if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}, &PlaybackProgress{}, &TranscriptionBatch{}, &PlanLimit{}, &UsageEvent{}, &DeviceToken{}, &BugReport{}); err != nil {
+		if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}, &PlaybackProgress{}, &TranscriptionBatch{}, &PlanLimit{}, &UsageEvent{}, &DeviceToken{}, &BugReport{}, &AppConfig{}); err != nil {
 			log.Fatalf("AutoMigrate failed: %v", err)
 		}
 		seedPlanLimits()
+		seedAppConfig()
 	}
 	log.Println("Database connected and migrated successfully")
 }

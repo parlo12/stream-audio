@@ -32,6 +32,23 @@ Added June 16, 2026:
 6. **`/admin/grafana/`** → `localhost:3000` (Grafana, sub-path) and
    **`/admin/queues/`** → `localhost:8085` (asynqmon), both behind admin auth.
 
+Added June 17, 2026 (Phase A — remote config):
+
+7. **`/user/config`** (content-service remote config: feature flags, copy,
+   colors, displayed pricing, min-supported-build version gate). Like every
+   content-service `/user/*` route it needs its own location → `8083` or it
+   404s on auth-service. Add:
+   ```nginx
+   location /user/config {
+       proxy_pass http://localhost:8083;
+       proxy_set_header Host $host;
+       proxy_set_header Authorization $http_authorization;
+       proxy_set_header X-Real-IP $remote_addr;
+       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+       proxy_set_header X-Forwarded-Proto $scheme;
+   }
+   ```
+
 ## Verified
 - `/health` → 200; `X-Request-ID` present on responses.
 - 10 rapid `POST /login` → 6× 401 then 4× 429 (burst then throttle).
