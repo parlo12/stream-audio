@@ -196,6 +196,67 @@ ssh stream-app 'cd /opt/stream-audio/stream-audio && \
 
 ---
 
+---
+
+# Session 2 (2026-06-16) — APNs push, in-app bug reporting, TestFlight
+
+Built on top of Session 1. Backend `main` advanced through these commits;
+iOS `main` got the matching app changes.
+
+## APNs push notifications (#6) — DONE, production-ready
+- **Backend** (`content-service/push.go`): token-based (.p8) APNs via
+  `sideshow/apns2`. `device_tokens` table + `POST /user/device-token`. Pushes
+  fire from existing event points (`handleTranscribeBatch`: ready-to-play /
+  more-pages / complete; `handleFetchCover`: cover ready). Config via `APNS_*`
+  env; no-op if unset.
+- **Apple creds (live on server):** Key ID `43XD68HYU3`, Team ID `G9DTNH7ZNA`
+  (= Xcode DEVELOPMENT_TEAM), bundle `com.rmhrealestate.AudioBook`. The **.p8 is
+  a file** at `/opt/stream-audio/stream-audio/secrets/apns_key.p8`, mounted
+  read-only into both content containers via `./secrets:/secrets:ro`
+  (gitignored; `APNS_P8=/secrets/apns_key.p8`).
+- **`APNS_ENV` must match the build:** `sandbox` for Xcode debug builds,
+  **`production` for TestFlight/App Store**. Currently **production** (set when
+  TestFlight build went up). Flip with:
+  `sed -i 's/^APNS_ENV=.*/APNS_ENV=production/' .env && docker compose -f docker-compose.prod.yml up -d content-service content-worker`
+- **iOS:** `PushService.swift` (permission → register → POST token), AppDelegate
+  hooks, registration triggered after login + on foreground. Push capability
+  enabled via the `aps-environment` entitlement (added to
+  `AudioBook/AudioBook.entitlements`; `-allowProvisioningUpdates` auto-enabled
+  Push on the App ID).
+- **End-to-end on TestFlight still to confirm:** install via TestFlight → log in
+  → Allow notifications → a `device_tokens` row should appear → transcribe a book
+  in the background → "Your audiobook is ready 🎧".
+
+## In-app bug reporting (#3 add-on) — DONE, verified live
+- **Backend** (`content-service/bug_report.go`): `bug_reports` table +
+  `POST /user/bug-report` (stores message + device/app info + current book/page +
+  recent logs) → publishes MQTT `admin/bug_reports`. Admin list:
+  `GET /admin/bug-reports`.
+- **iOS:** "Report a Problem" in Profile → Legal opens `BugReportView` →
+  `BugReportService` posts the report. `DebugLogger` gained an always-on
+  `LogBuffer` (last 250 lines) so logs attach even in Release/TestFlight.
+
+## nginx routing fix (important gotcha)
+`/user/` falls through to **auth-service (8082)**; content-service `/user/*`
+endpoints need explicit nginx `location` blocks → 8083 or they 404. Added
+`/user/device-token` + `/user/bug-report`. **Any new content-service `/user/*`
+route needs an nginx block too.** Documented in `deploy/nginx/README.md`.
+
+## App icon fix (TestFlight blocker)
+App is **universal**; `AppIcon` had only iPhone sizes → "missing iPad 152x152".
+Regenerated a canonical iPhone+iPad set (20–1024) from the 1024 master with
+ImageMagick, **stripped the alpha channel** (Apple rejects alpha in the marketing
+icon), canonical `Contents.json`, bumped build to **3**. Verified
+`CFBundleIcons~ipad` + `Assets.car` carry iPad renditions, no actool errors.
+
+## #5 Grafana access (shown)
+https://narrafied.com/admin/grafana/ — default `admin`/`admin` (forces change on
+first login). `GRAFANA_ADMIN_PASSWORD` still unset in server `.env` — set it.
+
+## Status: submitted to TestFlight (Internal Only) on 2026-06-16.
+
+---
+
 ## Verified live on-device this session
 
 Presigned upload (initiate 200 → complete 202) · book parse (406 chunks) ·
