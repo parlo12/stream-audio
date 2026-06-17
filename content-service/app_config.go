@@ -57,6 +57,29 @@ const defaultAppConfigPayload = `{
   "colors": {
     "primary": "#FF6B35",
     "secondary": "#004E89"
+  },
+  "screens": {
+    "paywall": {
+      "type": "vstack",
+      "props": { "spacing": 30 },
+      "children": [
+        { "type": "slot", "props": { "id": "header" } },
+        { "type": "slot", "props": { "id": "status" } },
+        { "type": "slot", "props": { "id": "features" } },
+        { "type": "slot", "props": { "id": "payment" } },
+        { "type": "slot", "props": { "id": "terms" } }
+      ]
+    },
+    "home": {
+      "type": "vstack",
+      "props": { "alignment": "leading", "spacing": 20 },
+      "children": [
+        { "type": "slot", "props": { "id": "upgrade_cta" } },
+        { "type": "slot", "props": { "id": "subscription_button" } },
+        { "type": "slot", "props": { "id": "continue_listening" } },
+        { "type": "slot", "props": { "id": "audiobooks" } }
+      ]
+    }
   }
 }`
 
