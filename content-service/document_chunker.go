@@ -268,17 +268,43 @@ func ExtractTextFromTXT(path string) (string, error) {
 	return text, nil
 }
 
+// ExtractTextFromPDF extracts text from a PDF. It first tries rsc.io/pdf
+// (fast, in-process) but that library is fragile and fails/panics on many
+// real-world PDFs, so on any error or empty result it falls back to Calibre's
+// ebook-convert (robust). A truly empty result from both (e.g. a scanned/
+// image-only PDF) returns errNoTextExtracted so the client shows the
+// "scanned PDF" message rather than a generic failure.
 func ExtractTextFromPDF(path string) (string, error) {
-	file, err := os.Open(path)
+	text, err := extractPDFViaRSC(path)
+	if err == nil && strings.TrimSpace(text) != "" {
+		return text, nil
+	}
 	if err != nil {
-		return "", err
+		log.Printf("ℹ️ rsc.io/pdf failed for %s (%v); falling back to Calibre", path, err)
+	} else {
+		log.Printf("ℹ️ rsc.io/pdf got no text from %s; falling back to Calibre", path)
+	}
+	return extractPDFViaCalibre(path)
+}
+
+// extractPDFViaRSC uses rsc.io/pdf, recovering from its panics (it panics on
+// some malformed/feature-rich PDFs) so a bad PDF can't crash the worker.
+func extractPDFViaRSC(path string) (text string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("rsc.io/pdf panicked: %v", r)
+		}
+	}()
+	file, e := os.Open(path)
+	if e != nil {
+		return "", e
 	}
 	defer file.Close()
 
 	stat, _ := file.Stat()
-	reader, err := pdf.NewReader(file, stat.Size())
-	if err != nil {
-		return "", err
+	reader, e := pdf.NewReader(file, stat.Size())
+	if e != nil {
+		return "", e
 	}
 
 	var buf bytes.Buffer
@@ -288,13 +314,40 @@ func ExtractTextFromPDF(path string) (string, error) {
 			continue
 		}
 		content := page.Content()
-		for _, text := range content.Text {
-			buf.WriteString(text.S)
+		for _, t := range content.Text {
+			buf.WriteString(t.S)
 			buf.WriteString(" ")
 		}
 	}
-
 	return buf.String(), nil
+}
+
+// extractPDFViaCalibre converts a PDF to text with Calibre's ebook-convert,
+// which handles the wide range of real PDFs rsc.io/pdf can't.
+func extractPDFViaCalibre(path string) (string, error) {
+	if _, err := exec.LookPath("ebook-convert"); err != nil {
+		return "", fmt.Errorf("could not extract PDF text (rsc.io/pdf failed and Calibre ebook-convert unavailable): %w", err)
+	}
+	tempTxtFile := filepath.Join(os.TempDir(), fmt.Sprintf("pdf_temp_%d_%s.txt", os.Getpid(), filepath.Base(path)))
+	defer os.Remove(tempTxtFile)
+
+	cmd := exec.Command("ebook-convert", path, tempTxtFile, "--txt-output-encoding=utf-8")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("PDF conversion via Calibre failed: %w. Details: %s", err, stderr.String())
+	}
+
+	data, err := os.ReadFile(tempTxtFile)
+	if err != nil {
+		return "", fmt.Errorf("failed to read converted PDF text: %w", err)
+	}
+	text := cleanUTF8(data)
+	if strings.TrimSpace(text) == "" {
+		// Both extractors found nothing → almost certainly a scanned/image PDF.
+		return "", errNoTextExtracted
+	}
+	return text, nil
 }
 
 func ExtractTextFromEPUB(path string) (string, error) {
