@@ -257,6 +257,68 @@ first login). `GRAFANA_ADMIN_PASSWORD` still unset in server `.env` — set it.
 
 ---
 
+# Session 3 (2026-06-17) — TestFlight unblock: PDF ingest, failed-upload UX, dedup
+
+Real testers on TestFlight hit bugs uploading. Diagnosed + fixed live.
+
+## THE bug: PDF ingest (rsc.io/pdf panics) — FIXED ✅
+- Testers' PDFs → `chunking_failed` → 0 pages → **dead/graying Play button**.
+- Root cause: **`rsc.io/pdf` panics on common real-world PDFs** (e.g. `unknown
+  filter ASCII85Decode`). The panic → extraction error → no pages.
+- Fix (`932658a`, `content-service/document_chunker.go`): `ExtractTextFromPDF`
+  now (1) runs `rsc.io/pdf` **panic-guarded**, and (2) on any error/empty result
+  **falls back to Calibre `ebook-convert`** (already in the worker container).
+  If BOTH yield no text → `errNoTextExtracted` → "scanned PDF" message.
+- **Proven live:** a real text PDF that panicked rsc.io/pdf → Calibre fallback →
+  "Batch created 19 chunks" → `pending`. Server-side, so it helps ALL builds
+  immediately (no app update needed for the PDF fix).
+
+## Failed-upload UX (iOS) — `3fa0b73`
+- `Book.processingFailed` + `failureMessage` (statuses: `chunking_failed`,
+  `no_text_extracted`, `upload_expired`).
+- Library: red **"Couldn't process"** badge instead of raw status.
+- Play: alert ("Couldn't play this book" + tailored reason) with **Delete Book**
+  (BookPlaybackViewModel.deleteCurrentBook) instead of a silent dead button.
+- In the **next TestFlight build** (build 5+); not in build 4.
+
+## Double-merge dedup — `e57f55d`
+- The on-demand play path (API process) and look-ahead (worker process) could
+  both run `processSoundEffectsAndMerge` for the same page → regenerated
+  music+Foley + re-packaged HLS twice (wasted ElevenLabs/compute).
+- Fix: skip if `final_audio_path` already set, + cross-process **Redis claim**
+  `claimMerge` (`merge:lock:{book}:{page}`, 10m TTL, fails open). One merge/page.
+
+## Verified on a real TestFlight tester (rolflouisdor83@gmail.com = user 28)
+- Presigned upload works (PUT→R2→parse→`pending`); the earlier "files missing in
+  R2" was just **testers deleting their failed books** (book-delete cascades to
+  the R2 file) — NOT an upload bug.
+- `.txt` upload → 456 pages → tap Play → auto-transcribe → **auto-play** →
+  look-ahead transcribes + HLS-packages upcoming pages. Full chain live on device.
+- Push: fires for **background** processing (batch/cover), not on-demand active
+  play (correct — user is in-app). Verified separately (cover push received).
+
+## APNs key facts (recap, all live)
+- Key ID `43XD68HYU3`, Team ID `G9DTNH7ZNA`; `.p8` at
+  `/opt/stream-audio/stream-audio/secrets/apns_key.p8` (mounted ro, gitignored).
+- **`APNS_ENV` must match the build:** `sandbox` for Xcode/sideloaded dev builds,
+  `production` for TestFlight/App Store. Currently **production**. Flip:
+  `ssh stream-app "cd /opt/stream-audio/stream-audio && sed -i 's/^APNS_ENV=.*/APNS_ENV=<env>/' .env && docker compose -f docker-compose.prod.yml up -d content-service content-worker"`
+
+## To get app updates to TestFlight testers
+- **Backend changes** (PDF fix, dedup, push, bug-report) = **live, automatic** —
+  no app update.
+- **iOS changes** (failed-upload UX, etc.) = **archive build 5 → upload → testers
+  tap Update in TestFlight.** Build number is at **5** (3, 4 already uploaded);
+  export-compliance is auto now (`ITSAppUsesNonExemptEncryption=NO`).
+
+## Build/install on the local test iPhone (recap)
+- Device drifts between identifiers; `xcodebuild -destination 'generic/platform=iOS'`
+  builds without the device attached, then `xcrun devicectl device install --device
+  CAC9F2E2-578E-5002-8CAE-54479511875C <app>` installs **OTA** (wireless) when the
+  phone shows `available (paired)`.
+
+---
+
 ## Verified live on-device this session
 
 Presigned upload (initiate 200 → complete 202) · book parse (406 chunks) ·
