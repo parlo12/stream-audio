@@ -985,6 +985,22 @@ func getOrGenerateEffect(eventType string) (string, error) {
 // -------------------- orchestration --------------------
 
 // processSoundEffectsAndMerge now also injects background Foley.
+// claimMerge takes a short-lived cross-process lock for merging one page so the
+// on-demand play path (API process) and look-ahead (worker process) don't both
+// regenerate the same page's music+Foley. Returns true if this caller won the
+// claim. Fails open if Redis is unavailable (don't block merges).
+func claimMerge(bookID uint, index int) bool {
+	if rdb == nil {
+		return true
+	}
+	key := fmt.Sprintf("merge:lock:%d:%d", bookID, index)
+	ok, err := rdb.SetNX(context.Background(), key, "1", 10*time.Minute).Result()
+	if err != nil {
+		return true
+	}
+	return ok
+}
+
 func processSoundEffectsAndMerge(book Book, hash string, pageIndexes []int) {
 	if book.ContentHash == "" && hash != "" {
 		book.ContentHash = hash
@@ -995,6 +1011,17 @@ func processSoundEffectsAndMerge(book Book, hash string, pageIndexes []int) {
 		var chunk BookChunk
 		if err := db.Where("book_id = ? AND \"index\" = ?", book.ID, idx).First(&chunk).Error; err != nil {
 			log.Printf("❌ Failed to load chunk index %d: %v", idx, err)
+			continue
+		}
+
+		// Dedup: skip if this page already has final audio, and take a
+		// cross-process claim so play + look-ahead don't both merge it.
+		if chunk.FinalAudioPath != "" {
+			log.Printf("⏭️ Skip merge: book %d page %d already has final audio", book.ID, idx)
+			continue
+		}
+		if !claimMerge(book.ID, idx) {
+			log.Printf("⏭️ Skip merge: book %d page %d being merged elsewhere", book.ID, idx)
 			continue
 		}
 
