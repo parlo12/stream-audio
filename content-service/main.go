@@ -36,7 +36,9 @@ func mustEnv(key string) string {
 }
 
 // Allowed categories for validation
-var allowedCategories = []string{"Fiction", "Non-Fiction"}
+// Allowed book categories — keep in sync with the iOS Upload screen's `categories`
+// list (UploadBookView.swift). Matched case-insensitively (isValidCategory).
+var allowedCategories = []string{"Fiction", "Non-fiction", "Poetry", "Children's", "Young Adult", "Classics", "Drama", "Comics & Graphic Novels", "Anthology", "Reference"}
 
 // Book represents the model for a book uploaded by a user.
 type Book struct {
