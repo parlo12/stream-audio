@@ -49,6 +49,20 @@ Added June 17, 2026 (Phase A — remote config):
    }
    ```
 
+Added June 18, 2026 (Connect/casting Phase 1):
+
+8. **`/user/cast-events`** (content-service: records AirPlay/Bluetooth/Chromecast
+   cast events). Same `/user/*` → `8083` rule:
+   ```nginx
+   location /user/cast-events {
+       proxy_pass http://localhost:8083;
+       proxy_set_header Host $host;
+       proxy_set_header X-Real-IP $remote_addr;
+       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+       proxy_set_header X-Forwarded-Proto $scheme;
+   }
+   ```
+
 ## Verified
 - `/health` → 200; `X-Request-ID` present on responses.
 - 10 rapid `POST /login` → 6× 401 then 4× 429 (burst then throttle).
