@@ -213,6 +213,10 @@ func main() {
 		// explicit nginx `location /user/config` → 8083 or it 404s (auth-service).
 		authorized.GET("/config", getUserConfigHandler)
 
+		// Casting: record when a user sends playback to an external output
+		// (AirPlay/Bluetooth/Chromecast). Needs an explicit nginx location → 8083.
+		authorized.POST("/cast-events", RecordCastEventHandler)
+
 		authorized.POST("/books/:book_id/cover", requireBookOwnership(), uploadBookCoverHandler)
 
 		// Create a new book
@@ -334,7 +338,7 @@ func setupDatabase() {
 	// Only the API owns schema migrations. Workers skip AutoMigrate so a
 	// co-deploy doesn't race two concurrent CREATE TABLEs (Postgres DDL race).
 	if getEnv("RUN_MODE", "both") != "worker" {
-		if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}, &PlaybackProgress{}, &TranscriptionBatch{}, &PlanLimit{}, &UsageEvent{}, &DeviceToken{}, &BugReport{}, &AppConfig{}); err != nil {
+		if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}, &PlaybackProgress{}, &TranscriptionBatch{}, &PlanLimit{}, &UsageEvent{}, &DeviceToken{}, &BugReport{}, &AppConfig{}, &CastEvent{}); err != nil {
 			log.Fatalf("AutoMigrate failed: %v", err)
 		}
 		seedPlanLimits()
