@@ -63,10 +63,73 @@ Added June 18, 2026 (Connect/casting Phase 1):
    }
    ```
 
+Added July 3, 2026 (raw-IP exposure fix):
+
+9. **Default catch-all vhost** `sites-available/default-drop` (enabled in
+   `sites-enabled/`). Scanners hitting the raw IP were being served the Admin
+   Dashboard, because the old `admin` vhost (`listen 80; server_name
+   68.183.22.205;`) loaded alphabetically before `stream-audio` and acted as
+   the de facto default for port 80. Now any request that doesn't match a
+   real `server_name` is dropped:
+   ```nginx
+   server {
+       listen 80 default_server;
+       listen [::]:80 default_server;
+       server_name _;
+       return 444;
+   }
+
+   server {
+       listen 443 ssl default_server;
+       listen [::]:443 ssl default_server;
+       server_name _;
+       ssl_reject_handshake on;   # nginx >= 1.19.4
+   }
+   ```
+   The `admin` vhost is disabled (symlink removed from `sites-enabled/`; file
+   kept in `sites-available/` for reference).
+
+10. **Admin Dashboard moved to `https://narrafied.com/dashboard/`** (static
+    files still at `/var/www/admin`), behind the same basic auth as asynqmon:
+    ```nginx
+    location = /dashboard {
+        return 301 /dashboard/;
+    }
+
+    location /dashboard/ {
+        auth_basic "Restricted";
+        auth_basic_user_file /etc/nginx/.queues_htpasswd;
+        alias /var/www/admin/;
+        index index.html;
+        try_files $uri $uri/ /dashboard/index.html;
+    }
+
+    # Dashboard API base: strip /api and forward to auth-service
+    location /api/ {
+        proxy_pass http://localhost:8082/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Request-ID $request_id;
+    }
+    ```
+    ⚠️ `/api/` must NOT get `auth_basic`: the dashboard sends
+    `Authorization: Bearer <JWT>` on those calls, which collides with basic
+    auth's use of the same header. The `/api/*` admin routes are already
+    protected by the services' own `is_admin` JWT checks (and were already
+    publicly routable via `/admin/` on this vhost anyway).
+
 ## Verified
 - `/health` → 200; `X-Request-ID` present on responses.
 - 10 rapid `POST /login` → 6× 401 then 4× 429 (burst then throttle).
 - `/user/books` (no token) → 401, not rate-limited.
+- (July 3, 2026) `http://68.183.22.205/` → connection dropped (444);
+  `https://68.183.22.205/` → TLS handshake rejected; `narrafied.com` site,
+  `/health`, `/user/config` (401), `/login` (400) all intact;
+  `/dashboard/` → 401 without credentials, serves index/app.js/styles.css
+  and SPA fallback with credentials; `/api/health` → 200.
 
 ## Apply / change procedure
 1. `cp /etc/nginx/sites-available/stream-audio /root/nginx-backup-$(date +%F-%H%M%S)/`
