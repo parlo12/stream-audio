@@ -63,6 +63,25 @@ Added June 18, 2026 (Connect/casting Phase 1):
    }
    ```
 
+Added July 3, 2026 (referral program):
+
+8b. **`/invite/`** → `localhost:8082` (auth-service `GET /invite/:code` — public
+    referral-link redirect to `INVITE_REDIRECT_URL`). Without this block the
+    static-site `location /` swallows invite links and 404s:
+    ```nginx
+    location /invite/ {
+        proxy_pass http://localhost:8082;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Request-ID $request_id;
+    }
+    ```
+    The other referral endpoints (`/user/referral`,
+    `/user/subscription/validate-receipt`) ride the existing `/user/` default
+    → auth-service; no new blocks needed.
+
 Added July 3, 2026 (raw-IP exposure fix):
 
 9. **Default catch-all vhost** `sites-available/default-drop` (enabled in

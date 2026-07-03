@@ -76,6 +76,12 @@ type User struct {
 	IPAddress        string    // Last known IP address
 	OSVersion        string    // e.g., "iOS 17.2", "Android 14"
 	AppVersion       string    // App version for tracking
+	// Referral program fields (see referral.go). ReferralCode is a *string so
+	// pre-existing rows stay NULL (Postgres allows multiple NULLs under a
+	// unique index; empty strings would collide).
+	ReferralCode *string    `gorm:"uniqueIndex"` // shareable invite code, lazily generated
+	ReferredBy   uint       `gorm:"index"`       // user id of the referrer; 0 = organic signup
+	PremiumUntil *time.Time                      // referral-credit premium entitlement expiry
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 }
@@ -139,6 +145,8 @@ type SignupRequest struct {
 	PushToken   string `json:"push_token"`   // FCM/APNS token
 	OSVersion   string `json:"os_version"`   // iOS/Android version
 	AppVersion  string `json:"app_version"`  // App version
+	// Optional invite code from the referral program (see referral.go).
+	ReferralCode string `json:"referral_code"`
 }
 
 type LoginRequest struct {
@@ -298,6 +306,8 @@ func main() {
 	router.POST("/login", loginHandler)
 	// Account restoration (public endpoint)
 	router.POST("/restore-account", restoreAccountHandler)
+	// Referral invite link → download destination (public; see referral.go)
+	router.GET("/invite/:code", inviteRedirectHandler)
 
 	// Social login endpoints (public)
 	auth := router.Group("/auth")
@@ -318,6 +328,11 @@ func main() {
 		// Subscription management
 		authorized.GET("/subscription/status", getSubscriptionStatusHandler)
 		authorized.POST("/subscription/cancel", cancelSubscriptionHandler)
+		// Apple IAP receipt validation (the iOS app has always called this;
+		// it 404'd until the referral work implemented it — referral.go)
+		authorized.POST("/subscription/validate-receipt", validateReceiptHandler)
+		// Referral program: code, invite link, stats
+		authorized.GET("/referral", getReferralInfoHandler)
 		// Activity tracking
 		authorized.POST("/activity/ping", updateUserActivityHandler)
 		// Account deactivation and deletion
@@ -514,7 +529,7 @@ func setupDatabase() {
 	configureConnPool(db)
 
 	// Run migrations
-	if err := db.AutoMigrate(&User{}, &UserHistory{}, &UserBookHistory{}, &ProcessedStripeEvent{}, &AuditLog{}); err != nil {
+	if err := db.AutoMigrate(&User{}, &UserHistory{}, &UserBookHistory{}, &ProcessedStripeEvent{}, &AuditLog{}, &ReferralCredit{}); err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
 	}
 
@@ -580,6 +595,11 @@ func signupHandler(c *gin.Context) {
 		return
 	}
 
+	// Resolve an optional referral code. Invalid/self-referral codes are
+	// ignored (never block signup); the credit is only awarded later, when
+	// this account converts to paid (referral.go).
+	referredBy := resolveReferralCode(req.ReferralCode, req.DeviceID)
+
 	// Create a new user with default free account type and public profile
 	user := User{
 		Username:    req.Username,
@@ -595,6 +615,7 @@ func signupHandler(c *gin.Context) {
 		IPAddress:   clientIP,
 		OSVersion:   req.OSVersion,
 		AppVersion:  req.AppVersion,
+		ReferredBy:  referredBy,
 	}
 
 	// Save the user to the database
@@ -658,7 +679,7 @@ func loginHandler(c *gin.Context) {
 		"username":     user.Username,
 		"user_id":      user.ID,
 		"is_admin":     user.IsAdmin,
-		"account_type": user.AccountType,
+		"account_type": effectiveAccountType(&user), // billing tier OR unexpired referral credit
 		"exp":          time.Now().Add(time.Hour * 72).Unix(),
 		"iat":          time.Now().Unix(),
 	}
@@ -831,6 +852,9 @@ func stripeWebhookHandler(c *gin.Context) {
 		}
 		customerID := session.Customer.ID
 		updateUserAccountType(customerID, "paid")
+		// First paid conversion of a referred user → credit the referrer
+		// (idempotent; see referral.go).
+		awardReferralForStripeCustomer(customerID)
 
 	case "customer.subscription.updated":
 		// Renewal/cancel/reactivation: reconcile tier from the live status so a
@@ -900,7 +924,7 @@ func getAccountTypeHandler(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"account_type": user.AccountType,
+		"account_type": effectiveAccountType(&user),
 	})
 }
 
@@ -937,7 +961,7 @@ func profileHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"username":     user.Username,
 		"email":        user.Email,
-		"account_type": user.AccountType,
+		"account_type": effectiveAccountType(&user),
 		"is_public":    user.IsPublic,
 		"state":        user.State,
 		"books_read":   user.BooksRead,
@@ -1010,12 +1034,17 @@ func getSubscriptionStatusHandler(c *gin.Context) {
 
 	// 3. Check if user has a Stripe customer ID
 	if user.StripeCustomerID == "" {
-		c.JSON(http.StatusOK, gin.H{
-			"account_type":        user.AccountType,
+		resp := gin.H{
+			"account_type":        effectiveAccountType(&user),
 			"has_subscription":    false,
 			"subscription_status": "none",
 			"message":             "No subscription found",
-		})
+		}
+		if user.PremiumUntil != nil && user.PremiumUntil.After(time.Now()) {
+			resp["premium_until"] = user.PremiumUntil.Format(time.RFC3339)
+			resp["message"] = "Premium via referral credit"
+		}
+		c.JSON(http.StatusOK, resp)
 		return
 	}
 
@@ -1046,7 +1075,7 @@ func getSubscriptionStatusHandler(c *gin.Context) {
 	// 6. Return subscription details
 	if activeSub != nil {
 		c.JSON(http.StatusOK, gin.H{
-			"account_type":           user.AccountType,
+			"account_type":           effectiveAccountType(&user),
 			"has_subscription":       true,
 			"subscription_id":        activeSub.ID,
 			"subscription_status":    activeSub.Status,
@@ -1060,12 +1089,17 @@ func getSubscriptionStatusHandler(c *gin.Context) {
 			"plan_interval":          activeSub.Items.Data[0].Price.Recurring.Interval,
 		})
 	} else {
-		c.JSON(http.StatusOK, gin.H{
-			"account_type":        user.AccountType,
+		resp := gin.H{
+			"account_type":        effectiveAccountType(&user),
 			"has_subscription":    false,
 			"subscription_status": "inactive",
 			"message":             "No active subscription found",
-		})
+		}
+		if user.PremiumUntil != nil && user.PremiumUntil.After(time.Now()) {
+			resp["premium_until"] = user.PremiumUntil.Format(time.RFC3339)
+			resp["message"] = "Premium via referral credit"
+		}
+		c.JSON(http.StatusOK, resp)
 	}
 }
 
@@ -2352,7 +2386,7 @@ func appleSignInHandler(c *gin.Context) {
 			"id":              user.ID,
 			"username":        user.Username,
 			"email":           user.Email,
-			"account_type":    user.AccountType,
+			"account_type":    effectiveAccountType(user),
 			"is_new_user":     isNewUser,
 			"profile_picture": user.ProfilePictureURL,
 		},
@@ -2404,7 +2438,7 @@ func googleSignInHandler(c *gin.Context) {
 			"id":              user.ID,
 			"username":        user.Username,
 			"email":           user.Email,
-			"account_type":    user.AccountType,
+			"account_type":    effectiveAccountType(user),
 			"is_new_user":     isNewUser,
 			"profile_picture": user.ProfilePictureURL,
 		},
@@ -2464,7 +2498,7 @@ func facebookLoginHandler(c *gin.Context) {
 			"id":              user.ID,
 			"username":        user.Username,
 			"email":           user.Email,
-			"account_type":    user.AccountType,
+			"account_type":    effectiveAccountType(user),
 			"is_new_user":     isNewUser,
 			"profile_picture": user.ProfilePictureURL,
 		},
@@ -2922,7 +2956,7 @@ func generateJWTToken(user *User) (string, error) {
 		"username":     user.Username,
 		"user_id":      user.ID,
 		"is_admin":     user.IsAdmin,
-		"account_type": user.AccountType, // lets content-service skip an HTTP hop
+		"account_type": effectiveAccountType(user), // lets content-service skip an HTTP hop
 		"exp":          time.Now().Add(72 * time.Hour).Unix(), // 72 hours expiry
 		"iat":          time.Now().Unix(),
 	}
