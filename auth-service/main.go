@@ -335,6 +335,9 @@ func main() {
 		authorized.GET("/referral", getReferralInfoHandler)
 		// Activity tracking
 		authorized.POST("/activity/ping", updateUserActivityHandler)
+		// Phone number (used by contact discovery — see content-service
+		// discovery.go for the hashing contract)
+		authorized.POST("/phone", updatePhoneHandler)
 		// Account deactivation and deletion
 		authorized.POST("/deactivate", deactivateAccountHandler)
 		authorized.POST("/delete", deleteAccountHandler)
@@ -974,6 +977,7 @@ func profileHandler(c *gin.Context) {
 		"is_public":    user.IsPublic,
 		"state":        user.State,
 		"books_read":   booksListened,
+		"phone_number": user.PhoneNumber,
 		"created_at":   user.CreatedAt,
 	})
 }

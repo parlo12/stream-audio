@@ -307,3 +307,56 @@ func inviteRedirectHandler(c *gin.Context) {
 	target := getEnv("INVITE_REDIRECT_URL", "https://narrafied.com")
 	c.Redirect(http.StatusFound, target)
 }
+
+// MARK: Phone number (contact-discovery enrollment)
+
+// UpdatePhoneRequest — POST /user/phone
+type UpdatePhoneRequest struct {
+	PhoneNumber string `json:"phone_number" binding:"required"`
+}
+
+// updatePhoneHandler stores the caller's phone number so friends' contact
+// matching (content-service discovery.go) can find them. Accepts anything
+// with ≥10 digits; stores the raw input (normalization happens at match
+// time on both sides).
+//
+// TODO(before public launch): verify ownership with an SMS OTP — without it
+// a user could enter someone else's number and appear in that person's
+// friends' matches.
+func updatePhoneHandler(c *gin.Context) {
+	claims, exists := c.Get("claims")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+	userID := uint(claims.(jwt.MapClaims)["user_id"].(float64))
+
+	var req UpdatePhoneRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "phone_number required"})
+		return
+	}
+
+	digits := 0
+	for _, r := range req.PhoneNumber {
+		if r >= '0' && r <= '9' {
+			digits++
+		}
+	}
+	if digits < 10 || digits > 15 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Enter a valid phone number (10–15 digits)"})
+		return
+	}
+
+	if err := db.Model(&User{}).Where("id = ?", userID).
+		Update("phone_number", strings.TrimSpace(req.PhoneNumber)).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not save phone number"})
+		return
+	}
+
+	log.Printf("📱 user %d set a phone number (contact discovery enabled)", userID)
+	c.JSON(http.StatusOK, gin.H{
+		"message":      "Phone number saved",
+		"phone_number": strings.TrimSpace(req.PhoneNumber),
+	})
+}
