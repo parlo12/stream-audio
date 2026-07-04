@@ -281,6 +281,11 @@ func main() {
 		authorized.GET("/stats/most-played", GetMostPlayedBooksHandler) // Get most played books
 		authorized.GET("/stats/by-genre", GetStatsByGenreHandler)       // Get stats grouped by genre
 
+		// Social discovery (Home sections). NOTE: needs an nginx
+		// location /user/discover → :8083 like every content /user/* route.
+		authorized.GET("/discover/state", DiscoverByStateHandler)        // public users in the caller's state
+		authorized.POST("/discover/contacts", DiscoverContactsHandler)   // on-device-hashed contact matching
+
 	}
 
 	// Admin routes group

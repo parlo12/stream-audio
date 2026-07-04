@@ -957,6 +957,15 @@ func profileHandler(c *gin.Context) {
 		return
 	}
 
+	// books_read: the users.books_read column was never incremented anywhere,
+	// so it was permanently 0. Count books the user has actually listened to
+	// (a playback_progresses row exists once playback starts) — same shared DB,
+	// content-service owns the table.
+	var booksListened int64
+	if err := db.Table("playback_progresses").Where("user_id = ?", userID).Count(&booksListened).Error; err != nil {
+		booksListened = int64(user.BooksRead) // fall back to the stored column
+	}
+
 	// Return user profile details (excluding sensitive fields like password)
 	c.JSON(http.StatusOK, gin.H{
 		"username":     user.Username,
@@ -964,7 +973,7 @@ func profileHandler(c *gin.Context) {
 		"account_type": effectiveAccountType(&user),
 		"is_public":    user.IsPublic,
 		"state":        user.State,
-		"books_read":   user.BooksRead,
+		"books_read":   booksListened,
 		"created_at":   user.CreatedAt,
 	})
 }
