@@ -27,11 +27,12 @@ import (
 
 // discoveredPerson is one row of a discovery response.
 type discoveredPerson struct {
-	UserID    uint             `json:"user_id"`
-	Username  string           `json:"username"`
-	State     string           `json:"state"`
-	BookCount int64            `json:"book_count"`
-	Books     []discoveredBook `json:"books"`
+	UserID      uint             `json:"user_id"`
+	Username    string           `json:"username"`
+	State       string           `json:"state"`
+	BookCount   int64            `json:"book_count"`
+	IsFollowing bool             `json:"is_following"`
+	Books       []discoveredBook `json:"books"`
 }
 
 type discoveredBook struct {
@@ -76,8 +77,26 @@ func phoneHash(normalized string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// buildPeople loads book previews for a set of discovery users.
-func buildPeople(users []discoveryUser) []discoveredPerson {
+// buildPeople loads book previews for a set of discovery users and marks
+// which ones `followerID` already follows (so the client shows Follow vs
+// Following without a second round-trip).
+func buildPeople(followerID uint, users []discoveryUser) []discoveredPerson {
+	// One query for the caller's follow set among these users.
+	following := map[uint]bool{}
+	if len(users) > 0 {
+		ids := make([]uint, len(users))
+		for i, u := range users {
+			ids[i] = u.ID
+		}
+		var followed []uint
+		db.Model(&Follow{}).
+			Where("follower_id = ? AND followee_id IN ?", followerID, ids).
+			Pluck("followee_id", &followed)
+		for _, id := range followed {
+			following[id] = true
+		}
+	}
+
 	people := make([]discoveredPerson, 0, len(users))
 	for _, u := range users {
 		var count int64
@@ -103,11 +122,12 @@ func buildPeople(users []discoveryUser) []discoveredPerson {
 		}
 
 		people = append(people, discoveredPerson{
-			UserID:    u.ID,
-			Username:  u.Username,
-			State:     u.State,
-			BookCount: count,
-			Books:     preview,
+			UserID:      u.ID,
+			Username:    u.Username,
+			State:       u.State,
+			BookCount:   count,
+			IsFollowing: following[u.ID],
+			Books:       preview,
 		})
 	}
 	return people
@@ -141,7 +161,7 @@ func DiscoverByStateHandler(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"state":  callerState,
-		"people": buildPeople(users),
+		"people": buildPeople(userID, users),
 	})
 }
 
@@ -196,5 +216,5 @@ func DiscoverContactsHandler(c *gin.Context) {
 	}
 
 	log.Printf("👥 contact discovery for user %d: %d hashes in, %d matches", userID, len(req.PhoneHashes), len(matched))
-	c.JSON(http.StatusOK, gin.H{"people": buildPeople(matched)})
+	c.JSON(http.StatusOK, gin.H{"people": buildPeople(userID, matched)})
 }

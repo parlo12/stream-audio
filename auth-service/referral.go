@@ -360,3 +360,35 @@ func updatePhoneHandler(c *gin.Context) {
 		"phone_number": strings.TrimSpace(req.PhoneNumber),
 	})
 }
+
+// MARK: Profile visibility
+
+// UpdateVisibilityRequest — POST /user/visibility
+type UpdateVisibilityRequest struct {
+	IsPublic *bool `json:"is_public" binding:"required"`
+}
+
+// updateVisibilityHandler toggles the caller's profile between public
+// (discoverable in state/contact discovery and followable) and private.
+func updateVisibilityHandler(c *gin.Context) {
+	claims, exists := c.Get("claims")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+	userID := uint(claims.(jwt.MapClaims)["user_id"].(float64))
+
+	var req UpdateVisibilityRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.IsPublic == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "is_public required"})
+		return
+	}
+
+	if err := db.Model(&User{}).Where("id = ?", userID).
+		Update("is_public", *req.IsPublic).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not update visibility"})
+		return
+	}
+	log.Printf("👁️ user %d set profile is_public=%v", userID, *req.IsPublic)
+	c.JSON(http.StatusOK, gin.H{"is_public": *req.IsPublic})
+}

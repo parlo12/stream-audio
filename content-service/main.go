@@ -286,6 +286,12 @@ func main() {
 		authorized.GET("/discover/state", DiscoverByStateHandler)        // public users in the caller's state
 		authorized.POST("/discover/contacts", DiscoverContactsHandler)   // on-device-hashed contact matching
 
+		// Follow graph
+		authorized.POST("/follow", FollowUserHandler)              // follow {user_id}
+		authorized.DELETE("/follow/:user_id", UnfollowUserHandler) // unfollow
+		authorized.GET("/following", ListFollowingHandler)         // people I follow
+		authorized.GET("/follow/counts", FollowCountsHandler)      // {following, followers}
+
 	}
 
 	// Admin routes group
@@ -345,7 +351,7 @@ func setupDatabase() {
 	// Only the API owns schema migrations. Workers skip AutoMigrate so a
 	// co-deploy doesn't race two concurrent CREATE TABLEs (Postgres DDL race).
 	if getEnv("RUN_MODE", "both") != "worker" {
-		if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}, &PlaybackProgress{}, &TranscriptionBatch{}, &PlanLimit{}, &UsageEvent{}, &DeviceToken{}, &BugReport{}, &AppConfig{}, &CastEvent{}); err != nil {
+		if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}, &PlaybackProgress{}, &TranscriptionBatch{}, &PlanLimit{}, &UsageEvent{}, &DeviceToken{}, &BugReport{}, &AppConfig{}, &CastEvent{}, &Follow{}); err != nil {
 			log.Fatalf("AutoMigrate failed: %v", err)
 		}
 		seedPlanLimits()

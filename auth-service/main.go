@@ -338,6 +338,8 @@ func main() {
 		// Phone number (used by contact discovery — see content-service
 		// discovery.go for the hashing contract)
 		authorized.POST("/phone", updatePhoneHandler)
+		// Profile visibility (public = discoverable/followable)
+		authorized.POST("/visibility", updateVisibilityHandler)
 		// Account deactivation and deletion
 		authorized.POST("/deactivate", deactivateAccountHandler)
 		authorized.POST("/delete", deleteAccountHandler)
