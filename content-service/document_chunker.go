@@ -12,9 +12,31 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"rsc.io/pdf"
 )
+
+// calibreTimeout bounds ebook-convert so a runaway conversion on a huge/complex
+// file is killed rather than orphaned past the asynq parse timeout (15m).
+const calibreTimeout = 12 * time.Minute
+
+// runEbookConvert runs Calibre with its own timeout context so the subprocess
+// is terminated (not left running) if it hangs.
+func runEbookConvert(src, dst string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), calibreTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ebook-convert", src, dst, "--txt-output-encoding=utf-8")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("ebook-convert timed out after %s", calibreTimeout)
+		}
+		return fmt.Errorf("ebook-convert failed: %w. Details: %s", err, stderr.String())
+	}
+	return nil
+}
 
 // ChunkDocument extracts text and creates chunks for a book
 // For large books (4K+ pages), this uses batch inserts and runs asynchronously
@@ -331,11 +353,8 @@ func extractPDFViaCalibre(path string) (string, error) {
 	tempTxtFile := filepath.Join(os.TempDir(), fmt.Sprintf("pdf_temp_%d_%s.txt", os.Getpid(), filepath.Base(path)))
 	defer os.Remove(tempTxtFile)
 
-	cmd := exec.Command("ebook-convert", path, tempTxtFile, "--txt-output-encoding=utf-8")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("PDF conversion via Calibre failed: %w. Details: %s", err, stderr.String())
+	if err := runEbookConvert(path, tempTxtFile); err != nil {
+		return "", fmt.Errorf("PDF conversion via Calibre failed: %w", err)
 	}
 
 	data, err := os.ReadFile(tempTxtFile)
@@ -441,16 +460,9 @@ func ExtractTextFromMOBI(path string) (string, error) {
 	tempTxtFile := filepath.Join(tempDir, fmt.Sprintf("mobi_temp_%s.txt", filepath.Base(path)))
 	defer os.Remove(tempTxtFile) // Clean up temp file
 
-	// Run ebook-convert to convert MOBI to TXT
-	cmd := exec.Command("ebook-convert", path, tempTxtFile, "--txt-output-encoding=utf-8")
-
-	// Capture any errors from the conversion
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	err = cmd.Run()
-	if err != nil {
-		return "", fmt.Errorf("failed to convert MOBI file: %w. Details: %s", err, stderr.String())
+	// Run ebook-convert to convert MOBI to TXT (with its own timeout)
+	if err := runEbookConvert(path, tempTxtFile); err != nil {
+		return "", fmt.Errorf("failed to convert MOBI file: %w", err)
 	}
 
 	// Read the converted text file

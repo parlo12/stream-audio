@@ -82,12 +82,12 @@ func monthEnd() time.Time {
 	return time.Date(now.Year(), now.Month()+1, 1, 0, 0, 0, 0, time.UTC)
 }
 
-func planLimitFor(accountType, metric string) (int64, bool) {
+func planLimitFor(accountType, metric string) (limit int64, hardCap bool, ok bool) {
 	var pl PlanLimit
 	if err := db.Where("account_type = ? AND metric = ?", accountType, metric).First(&pl).Error; err != nil {
-		return 0, false
+		return 0, false, false
 	}
-	return pl.MonthlyLimit, true
+	return pl.MonthlyLimit, pl.HardCap, true
 }
 
 // checkAndConsume atomically reserves `amount` of a metric for the month and
@@ -96,7 +96,7 @@ func planLimitFor(accountType, metric string) (int64, bool) {
 // counter blip) — logged.
 func checkAndConsume(userID uint, accountType, metric string, amount int64, bookID uint) QuotaDecision {
 	resets := monthEnd()
-	limit, ok := planLimitFor(accountType, metric)
+	limit, hardCap, ok := planLimitFor(accountType, metric)
 	if !ok { // no configured limit → unlimited
 		if amount > 0 {
 			recordUsage(userID, metric, amount, bookID)
@@ -109,7 +109,9 @@ func checkAndConsume(userID uint, accountType, metric string, amount int64, book
 
 	if amount == 0 {
 		cur, _ := rdb.Get(ctx, key).Int64()
-		return QuotaDecision{Allowed: cur < limit, Used: cur, Limit: limit, ResetsAt: resets, Metric: metric}
+		// Soft (metered) limits never block the pre-check — they only inform.
+		allowed := !hardCap || cur < limit
+		return QuotaDecision{Allowed: allowed, Used: cur, Limit: limit, ResetsAt: resets, Metric: metric}
 	}
 
 	newVal, err := rdb.IncrBy(ctx, key, amount).Result()
@@ -121,10 +123,16 @@ func checkAndConsume(userID uint, accountType, metric string, amount int64, book
 	if newVal == amount { // first write this month
 		rdb.Expire(ctx, key, 35*24*time.Hour)
 	}
-	if newVal > limit {
-		rdb.DecrBy(ctx, key, amount) // rollback the reservation
+	if newVal > limit && hardCap {
+		// Hard cap → wall (rollback the reservation, deny). Only free-tier
+		// abuse metrics should be hard-capped.
+		rdb.DecrBy(ctx, key, amount)
 		return QuotaDecision{Allowed: false, Used: newVal - amount, Limit: limit, ResetsAt: resets, Metric: metric}
 	}
+	// Soft (metered) limit: record the usage and ALWAYS allow — a large book
+	// must never stall mid-transcription. Overage is visible in usage_events
+	// for later billing/analytics; the lazy pause-ahead model keeps real spend
+	// bounded by what's actually listened to.
 	recordUsage(userID, metric, amount, bookID)
 	return QuotaDecision{Allowed: true, Used: newVal, Limit: limit, ResetsAt: resets, Metric: metric}
 }

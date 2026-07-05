@@ -70,9 +70,13 @@ type BookRequest struct {
 
 // Chunk represents the model for chunks or segments of boook
 type BookChunk struct {
-	ID             uint   `gorm:"primaryKey"`
-	BookID         uint   `gorm:"index"`
-	Index          int    // Index of the chunk in the book
+	ID     uint `gorm:"primaryKey"`
+	// Composite index on (book_id, index): every per-page merge/HLS/claim does
+	// WHERE book_id=? AND index=? thousands of times per large book; without it
+	// each scans the whole book_id partition. Non-unique (existing data may
+	// hold retry-era duplicates; the parse lock prevents new ones).
+	BookID uint `gorm:"index;index:idx_bookchunk_book_index"`
+	Index  int  `gorm:"index:idx_bookchunk_book_index"` // Index of the chunk in the book
 	Content        string `gorm:"type:text"` // Text content of the chunk
 	AudioPath      string `gorm:"not null"`
 	FinalAudioPath string `json:"final_audio_path"` // 👈 New field

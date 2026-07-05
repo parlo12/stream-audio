@@ -343,7 +343,10 @@ func handleTranscribeBatch(ctx context.Context, t *asynq.Task) error {
 		// PAUSE_AHEAD_PAGES beyond where they're currently listening. Resumed by
 		// UpdatePlaybackProgressHandler when the listener advances.
 		nextStart := p.EndPage + 1
-		if p.AccountType == "free" && nextStart > listenerChunkIndex(p.UserID, p.BookID)+pauseAheadPages() {
+		// Lazy transcription for EVERY tier (not just free): never transcribe
+		// more than PAUSE_AHEAD_PAGES beyond the listener — this is what makes
+		// large books (thousands of chunks) tractable.
+		if nextStart > listenerChunkIndex(p.UserID, p.BookID)+pauseAheadPages() {
 			db.Model(&Book{}).Where("id = ?", p.BookID).Update("status", "paused_ahead")
 			log.Printf("⏸️ book %d paused ahead (next page %d, listener+window)", p.BookID, nextStart)
 			return nil
@@ -411,6 +414,19 @@ func handleParseBook(ctx context.Context, t *asynq.Task) error {
 	if err := db.First(&book, p.BookID).Error; err != nil {
 		return fmt.Errorf("book %d not found: %w", p.BookID, err)
 	}
+
+	// Parse lock: a timed-out parse's goroutine/subprocess keeps running after
+	// asynq gives up, so a retry could run resetBookContent (delete chunks)
+	// while the first parse is still inserting → duplicate/corrupt chunk set,
+	// book wedged in 'parsing'. Take a single-holder lock; if another parse
+	// holds it, skip this retry (SkipRetry) rather than corrupt.
+	if !claimParse(p.BookID) {
+		log.Printf("⏭️ parse for book %d already in progress — skipping duplicate", p.BookID)
+		return fmt.Errorf("parse already running: %w", asynq.SkipRetry)
+	}
+	defer releaseParse(p.BookID)
+
+	db.Model(&Book{}).Where("id = ?", p.BookID).Update("status", "parsing")
 	resetBookContent(p.BookID) // idempotent: clear any prior chunks on re-parse
 	pages, err := ChunkDocumentBatch(p.BookID, book.FilePath)
 	if err != nil {
@@ -427,6 +443,28 @@ func handleParseBook(ctx context.Context, t *asynq.Task) error {
 	db.Model(&Book{}).Where("id = ?", p.BookID).Update("status", "pending")
 	log.Printf("📖 Parsed book %d into %d pages (ready for transcription)", p.BookID, pages)
 	return nil
+}
+
+// claimParse / releaseParse guard against concurrent parses of the same book
+// (retry-while-orphaned-goroutine-still-running). 30-min TTL covers the worst
+// legitimate parse; fails open if Redis is down.
+func claimParse(bookID uint) bool {
+	if rdb == nil {
+		return true
+	}
+	key := fmt.Sprintf("parse:lock:%d", bookID)
+	ok, err := rdb.SetNX(context.Background(), key, "1", 30*time.Minute).Result()
+	if err != nil {
+		return true
+	}
+	return ok
+}
+
+func releaseParse(bookID uint) {
+	if rdb == nil {
+		return
+	}
+	rdb.Del(context.Background(), fmt.Sprintf("parse:lock:%d", bookID))
 }
 
 // handleHLSPackage segments a completed page's audio into HLS and stores the
@@ -525,6 +563,42 @@ func reconcileUploadsLoop() {
 	defer ticker.Stop()
 	for range ticker.C {
 		reconcileStaleUploads()
+		reclaimStalePages()
+		reclaimWedgedParses()
+	}
+}
+
+// reclaimStalePages resets chunks stuck in tts_status='processing' longer than
+// the batch timeout back to 'pending' so a timed-out/crashed batch doesn't lose
+// those pages forever (the claim guard excludes 'processing', so they'd never
+// be retried otherwise). Their consumed quota is metered, not refunded — cheap
+// vs. permanently-dead pages.
+func reclaimStalePages() {
+	cutoff := time.Now().Add(-35 * time.Minute) // > batch Timeout (30m)
+	res := db.Model(&BookChunk{}).
+		Where("tts_status = ? AND updated_at < ?", "processing", cutoff).
+		Update("tts_status", "pending")
+	if res.RowsAffected > 0 {
+		log.Printf("♻️ reclaimed %d page(s) stuck in 'processing'", res.RowsAffected)
+	}
+}
+
+// reclaimWedgedParses catches books stuck in 'parsing' with zero chunks well
+// past any legitimate parse window (parse lock TTL 30m) and marks them failed,
+// so a client isn't left staring at a book that will never progress.
+func reclaimWedgedParses() {
+	cutoff := time.Now().Add(-40 * time.Minute)
+	var books []Book
+	if err := db.Where("status = ? AND updated_at < ?", "parsing", cutoff).Find(&books).Error; err != nil {
+		return
+	}
+	for _, b := range books {
+		var chunkCount int64
+		db.Model(&BookChunk{}).Where("book_id = ?", b.ID).Count(&chunkCount)
+		if chunkCount == 0 {
+			db.Model(&Book{}).Where("id = ?", b.ID).Update("status", "chunking_failed")
+			log.Printf("♻️ book %d wedged in 'parsing' with no chunks — marked chunking_failed", b.ID)
+		}
 	}
 }
 
