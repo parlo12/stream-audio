@@ -194,10 +194,12 @@ func DiscoverContactsHandler(c *gin.Context) {
 
 	// User base is small: hash every stored number on the fly. When this
 	// grows, precompute a phone_hash column instead.
+	// phone_verified gate: only SMS-OTP-verified numbers are matchable, so a
+	// user can't be found by a number they don't actually control.
 	var candidates []discoveryUser
 	if err := db.Table("users").
 		Select("id, username, state, phone_number").
-		Where("phone_number <> '' AND is_public = true AND id <> ?", userID).
+		Where("phone_number <> '' AND phone_verified = true AND is_public = true AND id <> ?", userID).
 		Scan(&candidates).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "discovery query failed"})
 		return

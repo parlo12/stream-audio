@@ -348,13 +348,19 @@ func updatePhoneHandler(c *gin.Context) {
 		return
 	}
 
+	// Saving a raw number leaves it UNVERIFIED — it won't be matchable in
+	// contact discovery until the user passes SMS OTP (twilio.go). Changing
+	// the number always clears a prior verification.
 	if err := db.Model(&User{}).Where("id = ?", userID).
-		Update("phone_number", strings.TrimSpace(req.PhoneNumber)).Error; err != nil {
+		Updates(map[string]interface{}{
+			"phone_number":   strings.TrimSpace(req.PhoneNumber),
+			"phone_verified": false,
+		}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not save phone number"})
 		return
 	}
 
-	log.Printf("📱 user %d set a phone number (contact discovery enabled)", userID)
+	log.Printf("📱 user %d set a phone number (unverified)", userID)
 	c.JSON(http.StatusOK, gin.H{
 		"message":      "Phone number saved",
 		"phone_number": strings.TrimSpace(req.PhoneNumber),

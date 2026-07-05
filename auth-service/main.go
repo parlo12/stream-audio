@@ -70,6 +70,7 @@ type User struct {
 	ProfilePictureURL string    // Profile picture from social provider
 	// Device tracking fields for account restoration
 	PhoneNumber      string    `gorm:"index"`                       // User's phone number
+	PhoneVerified    bool      `gorm:"default:false"`               // true only after SMS OTP — gates contact discovery
 	DeviceModel      string    // e.g., "iPhone 14 Pro", "Samsung Galaxy S21"
 	DeviceID         string    `gorm:"index"`                       // iOS IDFA or Android GAID
 	PushToken        string    // FCM/APNS push notification token
@@ -338,6 +339,10 @@ func main() {
 		// Phone number (used by contact discovery — see content-service
 		// discovery.go for the hashing contract)
 		authorized.POST("/phone", updatePhoneHandler)
+		// SMS OTP verification (Twilio Verify) — only verified numbers are
+		// matchable in contact discovery (twilio.go)
+		authorized.POST("/phone/start", startPhoneVerificationHandler)
+		authorized.POST("/phone/verify", checkPhoneVerificationHandler)
 		// Profile visibility (public = discoverable/followable)
 		authorized.POST("/visibility", updateVisibilityHandler)
 		// Account deactivation and deletion
@@ -978,9 +983,10 @@ func profileHandler(c *gin.Context) {
 		"account_type": effectiveAccountType(&user),
 		"is_public":    user.IsPublic,
 		"state":        user.State,
-		"books_read":   booksListened,
-		"phone_number": user.PhoneNumber,
-		"created_at":   user.CreatedAt,
+		"books_read":     booksListened,
+		"phone_number":   user.PhoneNumber,
+		"phone_verified": user.PhoneVerified,
+		"created_at":     user.CreatedAt,
 	})
 }
 
