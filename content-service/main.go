@@ -290,6 +290,7 @@ func main() {
 		authorized.POST("/follow", FollowUserHandler)              // follow {user_id}
 		authorized.DELETE("/follow/:user_id", UnfollowUserHandler) // unfollow
 		authorized.GET("/following", ListFollowingHandler)         // people I follow
+		authorized.GET("/followers", ListFollowersHandler)         // people who follow me
 		authorized.GET("/follow/counts", FollowCountsHandler)      // {following, followers}
 
 	}

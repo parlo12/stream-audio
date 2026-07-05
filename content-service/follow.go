@@ -14,6 +14,7 @@ package main
 // references the shared users table owned by auth-service.
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -74,6 +75,20 @@ func FollowUserHandler(c *gin.Context) {
 		return
 	}
 	log.Printf("➕ user %d followed %d", followerID, req.UserID)
+
+	// Notify the followee — but only on a genuinely NEW follow (RowsAffected>0),
+	// so re-tapping/replays don't spam. Push carries the follower's username.
+	if res.RowsAffected > 0 {
+		var followerName string
+		db.Table("users").Select("username").Where("id = ?", followerID).Scan(&followerName)
+		if followerName == "" {
+			followerName = "Someone"
+		}
+		go sendPushToUser(req.UserID, "New follower 👋",
+			fmt.Sprintf("%s started following you on Narrafied.", followerName),
+			map[string]interface{}{"type": "new_follower", "follower_id": followerID})
+	}
+
 	c.JSON(http.StatusOK, gin.H{"following": true, "user_id": req.UserID})
 }
 
@@ -118,7 +133,33 @@ func ListFollowingHandler(c *gin.Context) {
 		Scan(&users)
 
 	// buildPeople marks is_following (all true here) and attaches books.
-	c.JSON(http.StatusOK, gin.H{"people": buildPeople(followerID, users)})
+	c.JSON(http.StatusOK, gin.H{"people": buildPeople(followerID, users, false)})
+}
+
+// ListFollowersHandler — GET /user/followers
+// People who follow the caller (so they can see who followed them).
+func ListFollowersHandler(c *gin.Context) {
+	userID := c.GetUint("user_id")
+
+	var followerIDs []uint
+	db.Model(&Follow{}).Where("followee_id = ?", userID).
+		Order("created_at DESC").Pluck("follower_id", &followerIDs)
+
+	if len(followerIDs) == 0 {
+		c.JSON(http.StatusOK, gin.H{"people": []discoveredPerson{}})
+		return
+	}
+
+	var users []discoveryUser
+	db.Table("users").
+		Select("id, username, state, phone_number").
+		Where("id IN ?", followerIDs).
+		Scan(&users)
+
+	// buildPeople marks is_following from the CALLER's perspective, so a
+	// follower the caller also follows shows "Following" (mutual) — handy for
+	// follow-back.
+	c.JSON(http.StatusOK, gin.H{"people": buildPeople(userID, users, false)})
 }
 
 // FollowCountsHandler — GET /user/follow/counts

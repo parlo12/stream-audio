@@ -80,7 +80,9 @@ func phoneHash(normalized string) string {
 // buildPeople loads book previews for a set of discovery users and marks
 // which ones `followerID` already follows (so the client shows Follow vs
 // Following without a second round-trip).
-func buildPeople(followerID uint, users []discoveryUser) []discoveredPerson {
+// skipEmpty=true hides people with no books (discovery — nothing to show);
+// follow lists pass false so you always see who you follow / who follows you.
+func buildPeople(followerID uint, users []discoveryUser, skipEmpty bool) []discoveredPerson {
 	// One query for the caller's follow set among these users.
 	following := map[uint]bool{}
 	if len(users) > 0 {
@@ -101,8 +103,8 @@ func buildPeople(followerID uint, users []discoveryUser) []discoveredPerson {
 	for _, u := range users {
 		var count int64
 		db.Model(&Book{}).Where("user_id = ?", u.ID).Count(&count)
-		if count == 0 {
-			continue // nothing to show — skip empty libraries
+		if count == 0 && skipEmpty {
+			continue // discovery: nothing to show
 		}
 
 		var books []Book
@@ -161,7 +163,7 @@ func DiscoverByStateHandler(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"state":  callerState,
-		"people": buildPeople(userID, users),
+		"people": buildPeople(userID, users, true),
 	})
 }
 
@@ -216,5 +218,5 @@ func DiscoverContactsHandler(c *gin.Context) {
 	}
 
 	log.Printf("👥 contact discovery for user %d: %d hashes in, %d matches", userID, len(req.PhoneHashes), len(matched))
-	c.JSON(http.StatusOK, gin.H{"people": buildPeople(userID, matched)})
+	c.JSON(http.StatusOK, gin.H{"people": buildPeople(userID, matched, true)})
 }
