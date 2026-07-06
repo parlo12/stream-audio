@@ -60,9 +60,15 @@ func initGutenbergCatalog() {
 		var count int64
 		db.Model(&GutenbergBook{}).Count(&count)
 		if count == 0 {
-			log.Printf("📚 gutenberg: catalog empty — ingesting…")
-			if err := ingestGutenbergCatalog(); err != nil {
-				log.Printf("⚠️ gutenberg: initial ingest failed: %v", err)
+			// Retry — a cold container's first outbound dial can time out.
+			for attempt := 1; attempt <= 4; attempt++ {
+				log.Printf("📚 gutenberg: catalog empty — ingesting (attempt %d)…", attempt)
+				if err := ingestGutenbergCatalog(); err != nil {
+					log.Printf("⚠️ gutenberg: ingest attempt %d failed: %v", attempt, err)
+					time.Sleep(time.Duration(attempt*15) * time.Second)
+					continue
+				}
+				break
 			}
 		}
 		ticker := time.NewTicker(7 * 24 * time.Hour)
@@ -151,6 +157,16 @@ func ingestGutenbergCatalog() error {
 	flush()
 	log.Printf("📚 gutenberg: ingested/updated %d titles", total)
 	return nil
+}
+
+// RefreshGutenbergHandler — POST /admin/gutenberg/refresh (force re-ingest).
+func RefreshGutenbergHandler(c *gin.Context) {
+	go func() {
+		if err := ingestGutenbergCatalog(); err != nil {
+			log.Printf("⚠️ gutenberg: manual refresh failed: %v", err)
+		}
+	}()
+	c.JSON(http.StatusAccepted, gin.H{"message": "Catalog refresh started"})
 }
 
 // gutenbergResult is the trimmed search-result shape.

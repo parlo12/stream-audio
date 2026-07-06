@@ -312,6 +312,7 @@ func main() {
 		admin.DELETE("/files", deleteFileContentHandler)
 		admin.GET("/files/tree", getFileTreeContentHandler)
 		admin.GET("/bug-reports", ListBugReportsHandler)
+		admin.POST("/gutenberg/refresh", RefreshGutenbergHandler)
 	}
 
 	for _, r := range router.Routes() {
