@@ -362,10 +362,12 @@ func formatAuthor(authors string) string {
 	if p := strings.Index(first, ","); p >= 0 {
 		last := strings.TrimSpace(first[:p])
 		rest := strings.TrimSpace(first[p+1:])
-		// rest may contain life dates; keep only the given-name part.
+		// rest is "First Middle, birthyear-deathyear" — keep only the name,
+		// trimming the trailing ", " before the life dates.
 		if d := strings.IndexAny(rest, "0123456789("); d >= 0 {
-			rest = strings.TrimSpace(rest[:d])
+			rest = strings.Trim(rest[:d], " ,")
 		}
+		rest = strings.Trim(rest, " ,")
 		if rest != "" {
 			return rest + " " + last
 		}
