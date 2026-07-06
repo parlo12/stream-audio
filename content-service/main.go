@@ -290,6 +290,11 @@ func main() {
 		authorized.GET("/discover/state", DiscoverByStateHandler)        // public users in the caller's state
 		authorized.POST("/discover/contacts", DiscoverContactsHandler)   // on-device-hashed contact matching
 
+		// Free books (Project Gutenberg catalog). NOTE: needs an nginx
+		// location /user/gutenberg → :8083.
+		authorized.GET("/gutenberg/search", SearchGutenbergHandler)   // search the free catalog
+		authorized.POST("/gutenberg/import", ImportGutenbergHandler)  // import a free book → audiobook
+
 		// Follow graph
 		authorized.POST("/follow", FollowUserHandler)              // follow {user_id}
 		authorized.DELETE("/follow/:user_id", UnfollowUserHandler) // unfollow
@@ -361,6 +366,7 @@ func setupDatabase() {
 		}
 		seedPlanLimits()
 		seedAppConfig()
+		initGutenbergCatalog() // migrate + ingest the free-books catalog (async)
 	}
 	log.Println("Database connected and migrated successfully")
 }
