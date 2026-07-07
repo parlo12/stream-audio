@@ -73,7 +73,7 @@ func ProcessChunksTTSHandler(c *gin.Context) {
 		}
 		pageIndex := chunk.Index + 1 // Convert to 1-based index for user-friendly messages
 		db.Model(&chunk).Update("TTSStatus", "processing")
-		audioPath, err := convertTextToAudio(chunk.Content, chunk.ID)
+		audioPath, err := convertTextToAudioForChunk(chunk)
 		if err != nil {
 			db.Model(&chunk).Update("TTSStatus", "failed")
 			continue

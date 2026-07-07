@@ -4,7 +4,10 @@ package main
 // segmentsCoverInput must accept faithful dialogue splits (including quote /
 // punctuation reformatting) and reject dropped or paraphrased book text.
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func seg(text string) DialogueSegment {
 	return DialogueSegment{Type: "narrator", Text: text}
@@ -136,5 +139,77 @@ func TestResolveEventTimestamps_OCRLineWrap(t *testing.T) {
 	got := resolveEventTimestamps(text, 60.0, ev)
 	if len(got["wind"]) != 1 {
 		t.Fatalf("quote spanning an OCR line wrap must match, got %v", got)
+	}
+}
+
+// ---- Phase 3: voice continuity (audit H1) ----
+
+func TestAssignSegmentVoices_StableAcrossChunks(t *testing.T) {
+	vm := map[string]CharacterVoice{}
+	chunk1 := []DialogueSegment{
+		{Type: "dialogue", Speaker: "Darcy", Gender: "male", IsDialogue: true, Text: "a"},
+		{Type: "dialogue", Speaker: "Elizabeth", Gender: "female", IsDialogue: true, Text: "b"},
+		{Type: "dialogue", Speaker: "Bingley", Gender: "male", IsDialogue: true, Text: "c"},
+	}
+	if changed := assignSegmentVoices(vm, chunk1); !changed {
+		t.Fatal("first chunk must register new characters")
+	}
+	if chunk1[0].Voice == chunk1[2].Voice {
+		t.Fatalf("two male characters must get distinct voices, both got %s", chunk1[0].Voice)
+	}
+
+	// Next chunk: same characters, model now guesses Darcy's gender wrong.
+	chunk2 := []DialogueSegment{
+		{Type: "dialogue", Speaker: "darcy", Gender: "unknown", IsDialogue: true, Text: "d"},
+	}
+	if changed := assignSegmentVoices(vm, chunk2); changed {
+		t.Fatal("known character must not change the cast")
+	}
+	if chunk2[0].Voice != chunk1[0].Voice {
+		t.Fatalf("Darcy flipped voice across chunks: %s → %s", chunk1[0].Voice, chunk2[0].Voice)
+	}
+	if chunk2[0].Gender != "male" {
+		t.Fatalf("persisted gender must win over re-guess, got %q", chunk2[0].Gender)
+	}
+}
+
+func TestAssignSegmentVoices_UnknownSpeakerNotNarrator(t *testing.T) {
+	vm := map[string]CharacterVoice{}
+	segs := []DialogueSegment{
+		{Type: "dialogue", Speaker: "", Gender: "unknown", IsDialogue: true, Text: "who is there"},
+	}
+	assignSegmentVoices(vm, segs)
+	if segs[0].Voice == VoiceNarrator || segs[0].Voice == "" {
+		t.Fatalf("unknown-speaker dialogue must not use the narrator voice, got %q", segs[0].Voice)
+	}
+}
+
+func TestSegmentsCoverInput_ContextLeakFails(t *testing.T) {
+	input := `"Good morning," said the captain.`
+	segs := []DialogueSegment{
+		// Model leaked the previous page's context into its output.
+		seg("The ship had sailed at dawn under a heavy grey sky and the crew was uneasy."),
+		{Type: "dialogue", Speaker: "Captain", Text: "Good morning,", IsDialogue: true},
+		seg("said the captain."),
+	}
+	if segmentsCoverInput(input, segs) {
+		t.Fatal("output much longer than input (context leak) must fail")
+	}
+}
+
+func TestCastPromptSection_DeterministicAndCapped(t *testing.T) {
+	vm := map[string]CharacterVoice{
+		"zed": {Gender: "male", Voice: "onyx"},
+		"amy": {Gender: "female", Voice: "nova"},
+	}
+	a, b := castPromptSection(vm), castPromptSection(vm)
+	if a != b {
+		t.Fatal("cast section must be deterministic")
+	}
+	if !strings.Contains(a, "amy (female)") || !strings.Contains(a, "zed (male)") {
+		t.Fatalf("unexpected cast rendering: %q", a)
+	}
+	if strings.Index(a, "amy") > strings.Index(a, "zed") {
+		t.Fatal("cast must be sorted")
 	}
 }

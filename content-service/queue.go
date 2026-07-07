@@ -232,7 +232,7 @@ func transcribePage(book Book, chunk BookChunk, userID uint, accountType string)
 
 	fail := func() { db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "failed") }
 
-	audioPath, err := convertTextToAudio(chunk.Content, chunk.ID)
+	audioPath, err := convertTextToAudioForChunk(chunk)
 	if err != nil {
 		fail()
 		return err
@@ -542,7 +542,7 @@ func lookAheadTranscribeChunk(book Book, chunk BookChunk, userID uint, accountTy
 		db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "pending")
 		return errQuotaExceeded
 	}
-	audioPath, err := convertTextToAudio(chunk.Content, chunk.ID)
+	audioPath, err := convertTextToAudioForChunk(chunk)
 	if err != nil {
 		db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "failed")
 		return err
