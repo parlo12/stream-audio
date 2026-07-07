@@ -55,7 +55,8 @@ type Book struct {
 	UserID      uint   `gorm:"index"`
 	CoverPath   string // Optional cover image path
 	CoverURL    string // Optional cover image URL for public access
-	VoiceMap    string `gorm:"type:text"` // JSON character→{gender,voice} cast (voice continuity, audit H1)
+	VoiceMap     string `gorm:"type:text"` // JSON character→{gender,voice} cast (voice continuity, audit H1)
+	ScorePalette string `gorm:"type:text"` // JSON []ScoreCue — per-book music palette (audit H2)
 	Index       int    // Index of the book in the list
 	CreatedAt   time.Time
 	UpdatedAt   time.Time

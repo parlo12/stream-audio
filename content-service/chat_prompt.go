@@ -42,6 +42,41 @@ type ChatResponse struct {
 	} `json:"choices"`
 }
 
+// callOpenAIChat posts a ChatRequest and decodes the response — the shared
+// HTTP plumbing for every prompt in the audio pipeline.
+func callOpenAIChat(reqBody ChatRequest) (*ChatResponse, error) {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		return nil, errors.New("OPENAI_API_KEY not set")
+	}
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("build HTTP request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request error: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := ioutil.ReadAll(resp.Body)
+		return nil, fmt.Errorf("GPT returned %d: %s", resp.StatusCode, respBody)
+	}
+	var chatResp ChatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+		return nil, fmt.Errorf("decode GPT response: %w", err)
+	}
+	return &chatResp, nil
+}
+
 // summarizeBookText truncates or passes through up to 500 chars for context.
 func summarizeBookText(bookText string) string {
 	if len(bookText) > 500 {
@@ -62,7 +97,7 @@ func generateOverallSoundPrompt(pageText string) (string, error) {
 	)
 
 	reqPayload := ChatRequest{
-		Model:       "gpt-4o",
+		Model:       classifyModel(), // audit L6: legacy fallback path — mini is fine
 		Messages:    []ChatMessage{{Role: "system", Content: "You are an audio production assistant."}, {Role: "user", Content: userContent}},
 		MaxTokens:   120, // audit M2: 100 truncated mid-sentence on wordy outputs
 		Temperature: 0.7,

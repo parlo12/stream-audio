@@ -336,7 +336,7 @@ Return ONLY a JSON object: {"moods": ["neutral", "action"]}
 Rules: exactly %d entries, in part order; each mood is one of "suspense", "action", "climax", "sad", "neutral".`, num, parts.String(), num)
 
 	reqBody := map[string]interface{}{
-		"model":           "gpt-4o",
+		"model":           classifyModel(), // audit L6: classification runs on mini
 		"messages":        []map[string]string{{"role": "system", "content": "Audio segmentation assistant."}, {"role": "user", "content": prompt}},
 		"temperature":     0.1, // classification — deterministic (audit M3)
 		"max_tokens":      600, // audit M2: 300 truncated long pages (>8 segments)
@@ -734,7 +734,7 @@ OUTPUT FORMAT - Return ONLY a JSON object:
 If no clear setting, return: {"setting": "neutral", "intensity": 0.3, "description": "No specific environment"}`, text, strings.Join(settingsList, ", "))
 
 	reqBody := map[string]interface{}{
-		"model": "gpt-4o",
+		"model": classifyModel(), // audit L6
 		"messages": []map[string]string{
 			{"role": "system", "content": "Scene setting detection assistant for audio production."},
 			{"role": "user", "content": prompt},
@@ -807,6 +807,14 @@ func generateAmbientSoundscape(setting *AmbientSetting, bookID uint) (string, er
 		return "", errors.New("XI_API_KEY not set")
 	}
 
+	// Audit L3: ambient prompts are static per setting — serve from the local
+	// disk or the persistent R2 library before ever calling ElevenLabs. (The
+	// bookID in the old filename was noise; clips are book-independent.)
+	local := fmt.Sprintf("./audio/ambient_%s.mp3", setting.Setting)
+	if fileExists(local) || fetchFromLibrary(ambientLibKey(setting.Setting), local) {
+		return local, nil
+	}
+
 	prompt, ok := ambientPrompts[setting.Setting]
 	if !ok {
 		prompt = ambientPrompts["neutral"]
@@ -840,42 +848,76 @@ func generateAmbientSoundscape(setting *AmbientSetting, bookID uint) (string, er
 
 	data, _ := io.ReadAll(resp.Body)
 	os.MkdirAll("./audio", 0755)
-	outPath := fmt.Sprintf("./audio/ambient_%s_%d.mp3", setting.Setting, bookID)
-	if err := os.WriteFile(outPath, data, 0644); err != nil {
+	if err := os.WriteFile(local, data, 0644); err != nil {
 		return "", fmt.Errorf("write ambient file: %w", err)
 	}
+	storeInLibrary(ambientLibKey(setting.Setting), local) // audit L3
 
-	log.Printf("✅ [Ambient] Generated: %s", outPath)
-	return outPath, nil
+	log.Printf("✅ [Ambient] Generated: %s", local)
+	return local, nil
 }
 
 // loopAmbientToLength loops the ambient clip to match TTS duration with fade
-// in/out. Output goes in the caller's per-job temp dir (B4).
+// in/out. Audit L4: repetitions are joined with 1s crossfades instead of
+// -stream_loop's hard seam (which popped audibly every 15s). Output goes in
+// the caller's per-job temp dir (B4).
 func loopAmbientToLength(ambientPath string, ttsDur float64, intensity float64, jobDir string) (string, error) {
 	// Volume based on intensity (very low: 0.08-0.18)
 	volume := 0.08 + (intensity * 0.10) // Maps 0.0-1.0 to 0.08-0.18
-
 	outPath := fmt.Sprintf("%s/ambient_looped.ogg", jobDir)
 
-	// Loop ambient, apply volume, add 1s fade in and 2s fade out
+	clipDur, err := getTTSDuration(ambientPath)
+	if err != nil || clipDur < 3 {
+		clipDur = 0 // fall through to legacy hard loop below
+	}
+
+	src := ambientPath
+	if clipDur > 0 && ttsDur > clipDur {
+		// Self-crossfade the clip until it covers the narration (+1s slack).
+		const xfade = 1.0
+		cur, curDur := ambientPath, clipDur
+		for i := 0; curDur < ttsDur+1 && i < 60; i++ {
+			next := fmt.Sprintf("%s/ambient_xloop_%d.ogg", jobDir, i)
+			cmd := exec.Command("ffmpeg", "-y",
+				"-i", cur, "-i", ambientPath,
+				"-filter_complex", fmt.Sprintf("[0:a][1:a]acrossfade=d=%.1f:c1=tri:c2=tri[out]", xfade),
+				"-map", "[out]", "-c:a", "libopus", "-b:a", "48k",
+				next,
+			)
+			if o, err := cmd.CombinedOutput(); err != nil {
+				log.Printf("⚠️ [Ambient] crossfade loop %d failed (%v), falling back to hard loop\n%s", i, err, o)
+				cur = ""
+				break
+			}
+			cur = next
+			curDur += clipDur - xfade
+		}
+		if cur != "" {
+			src = cur
+		}
+	}
+
 	filterComplex := fmt.Sprintf(
 		"volume=%.2f,afade=t=in:st=0:d=1,afade=t=out:st=%.2f:d=2",
 		volume, ttsDur-2,
 	)
-
-	cmd := exec.Command("ffmpeg", "-y",
-		"-stream_loop", "-1", "-i", ambientPath,
+	args := []string{"-y"}
+	if src == ambientPath && clipDur > 0 && ttsDur > clipDur {
+		// Crossfade build failed — legacy hard loop as last resort.
+		args = append(args, "-stream_loop", "-1")
+	}
+	args = append(args,
+		"-i", src,
 		"-t", fmt.Sprintf("%.2f", ttsDur),
 		"-af", filterComplex,
 		"-c:a", "libopus", "-b:a", "48k",
 		outPath,
 	)
-
-	if o, err := cmd.CombinedOutput(); err != nil {
+	if o, err := exec.Command("ffmpeg", args...).CombinedOutput(); err != nil {
 		return "", fmt.Errorf("loop ambient fail: %v\n%s", err, o)
 	}
 
-	log.Printf("✅ [Ambient] Looped to %.2fs with volume %.2f: %s", ttsDur, volume, outPath)
+	log.Printf("✅ [Ambient] Looped to %.2fs (seamless crossfades) with volume %.2f: %s", ttsDur, volume, outPath)
 	return outPath, nil
 }
 
@@ -1015,7 +1057,7 @@ Return ONLY a JSON object:
 {"events": [{"type": "door_creak", "quote": "the door groaned open"}]}`, sn, strings.Join(eventTypesList, ", "))
 
 	reqBody := map[string]interface{}{
-		"model": "gpt-4o",
+		"model": classifyModel(), // audit L6
 		"messages": []map[string]string{
 			{"role": "system", "content": "Audio event assistant."},
 			{"role": "user", "content": prompt},
@@ -1079,15 +1121,61 @@ Return ONLY a JSON object:
 	return validEvents, nil
 }
 
+// foleyLibKey / ambientLibKey — the R2 locations of the generic clip library
+// (audit L3). The 30+ Foley and ambient prompts are static, so every clip is
+// rendered by ElevenLabs at most ONCE per deployment lifetime and shared
+// across processes and restarts.
+func foleyLibKey(eventType string) string { return "library/foley/" + eventType + ".mp3" }
+func ambientLibKey(setting string) string { return "library/ambient/" + setting + ".mp3" }
+
+// fetchFromLibrary tries to satisfy a clip from the persistent R2 library.
+func fetchFromLibrary(key, localPath string) bool {
+	if store == nil {
+		return false
+	}
+	if ok, err := store.Exists(context.Background(), key); err != nil || !ok {
+		return false
+	}
+	os.MkdirAll("./audio", 0o755)
+	if err := store.GetToFile(context.Background(), key, localPath); err != nil {
+		log.Printf("⚠️ [Library] fetch %s failed: %v", key, err)
+		return false
+	}
+	log.Printf("📦 [Library] Fetched %s from R2", key)
+	return true
+}
+
+// storeInLibrary uploads a freshly generated clip (best-effort).
+func storeInLibrary(key, localPath string) {
+	if store == nil {
+		return
+	}
+	if err := store.PutFile(context.Background(), key, localPath, "audio/mpeg"); err != nil {
+		log.Printf("⚠️ [Library] store %s failed: %v", key, err)
+	} else {
+		log.Printf("📦 [Library] Stored %s in R2", key)
+	}
+}
+
 // getOrGenerateEffect returns (and caches) one short Foley clip per eventType.
+// Lookup order: memory → local disk → R2 library → ElevenLabs (then persisted
+// to the library so no process ever regenerates it — audit L3).
 func getOrGenerateEffect(eventType string) (string, error) {
 	// Check cache first (B5: guarded — accessed from concurrent goroutines).
 	effectCacheMu.RLock()
 	p, ok := effectCache[eventType]
 	effectCacheMu.RUnlock()
-	if ok {
+	if ok && fileExists(p) {
 		log.Printf("🔄 [Foley Cache] Using cached effect for: %s", eventType)
 		return p, nil
+	}
+
+	local := fmt.Sprintf("./audio/foley_%s.mp3", eventType)
+	if fileExists(local) || fetchFromLibrary(foleyLibKey(eventType), local) {
+		effectCacheMu.Lock()
+		effectCache[eventType] = local
+		effectCacheMu.Unlock()
+		return local, nil
 	}
 
 	// Validate event type
@@ -1121,6 +1209,7 @@ func getOrGenerateEffect(eventType string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	storeInLibrary(foleyLibKey(eventType), path) // audit L3: never regenerate
 
 	effectCacheMu.Lock()
 	effectCache[eventType] = path
@@ -1182,16 +1271,10 @@ func processSoundEffectsAndMerge(book Book, hash string, pageIndexes []int) {
 			continue
 		}
 
-		// Generate background music prompt from THIS page's text (Q1).
-		prompt, err := generateOverallSoundPrompt(chunk.Content)
-		if err != nil {
-			log.Printf("prompt err for chunk index %d: %v", idx, err)
-			cleanupTTS()
-			continue
-		}
-
-		// Q3: reuse cached music for identical prompts instead of regenerating.
-		bg, err := getOrGenerateBackgroundMusic(prompt)
+		// Audit H2: pick a cue from the book's score palette (one musical
+		// identity per book); falls back to the legacy per-page prompt path
+		// when the palette can't be created.
+		bg, err := backgroundMusicForPage(book, chunk.Content)
 		if err != nil {
 			log.Printf("music err for chunk index %d: %v", idx, err)
 			cleanupTTS()

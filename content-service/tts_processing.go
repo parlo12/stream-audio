@@ -82,7 +82,7 @@ Rules:
 Simply return the enhanced plain text ready to be read aloud.`
 
 	reqBody := ChatRequest{
-		Model: "gpt-4o",
+		Model: dialogueModel(), // audit L6: env-configurable
 		Messages: []ChatMessage{
 			{Role: "system", Content: systemContent},
 			{Role: "user", Content: rawText},
@@ -234,7 +234,7 @@ Return ONLY valid JSON, no other text or markdown.`
 	user.WriteString("\n---")
 
 	reqBody := ChatRequest{
-		Model: "gpt-4o",
+		Model: dialogueModel(), // audit L6: env-configurable
 		Messages: []ChatMessage{
 			{Role: "system", Content: systemContent},
 			{Role: "user", Content: user.String()},

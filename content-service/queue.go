@@ -238,12 +238,9 @@ func transcribePage(book Book, chunk BookChunk, userID uint, accountType string)
 		return err
 	}
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(chunk.Content)))
-	bgPrompt, err := generateOverallSoundPrompt(chunk.Content)
-	if err != nil {
-		fail()
-		return err
-	}
-	bgMusic, err := getOrGenerateBackgroundMusic(bgPrompt)
+	// Audit H2: score-palette cue (one musical identity per book), with the
+	// legacy per-page prompt path as fallback inside.
+	bgMusic, err := backgroundMusicForPage(book, chunk.Content)
 	if err != nil {
 		fail()
 		return err

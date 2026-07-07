@@ -213,3 +213,40 @@ func TestCastPromptSection_DeterministicAndCapped(t *testing.T) {
 		t.Fatal("cast must be sorted")
 	}
 }
+
+// ---- Phase 4: score palette (audit H2) ----
+
+func TestParseScorePalette_RoundTrip(t *testing.T) {
+	raw := `[{"mood":"neutral","prompt":"soft piano","r2_key":"audio/1/score/neutral.mp3"},{"mood":"action","prompt":"drums","r2_key":"audio/1/score/action.mp3"}]`
+	cues := parseScorePalette(raw)
+	if len(cues) != 2 || cues[0].Mood != "neutral" || cues[1].R2Key != "audio/1/score/action.mp3" {
+		t.Fatalf("bad parse: %+v", cues)
+	}
+	if parseScorePalette("") != nil || parseScorePalette("not json") != nil || parseScorePalette("[]") != nil {
+		t.Fatal("empty/invalid palettes must parse to nil")
+	}
+}
+
+func TestCueForMood_Fallbacks(t *testing.T) {
+	cues := []ScoreCue{{Mood: "neutral"}, {Mood: "action"}}
+	if c, ok := cueForMood(cues, "action"); !ok || c.Mood != "action" {
+		t.Fatal("exact mood must match")
+	}
+	if c, ok := cueForMood(cues, "climax"); !ok || c.Mood != "neutral" {
+		t.Fatal("missing mood must fall back to neutral")
+	}
+	if c, ok := cueForMood([]ScoreCue{{Mood: "sad"}}, "action"); !ok || c.Mood != "sad" {
+		t.Fatal("no neutral: must fall back to any cue")
+	}
+	if _, ok := cueForMood(nil, "action"); ok {
+		t.Fatal("empty palette must report not-ok")
+	}
+}
+
+func TestDefaultCuePrompt_CoversAllMoods(t *testing.T) {
+	for _, m := range scoreMoods {
+		if p := defaultCuePrompt(m); p == "" || !strings.Contains(strings.ToLower(p), "instrumental") {
+			t.Fatalf("mood %s: weak default prompt %q", m, p)
+		}
+	}
+}
