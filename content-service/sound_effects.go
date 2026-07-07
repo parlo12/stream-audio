@@ -912,13 +912,16 @@ type foleyQuoteEvent struct {
 	Quote string `json:"quote"`
 }
 
-// normalizeForSearch lowercases and straightens curly quotes/dashes so a
-// model-returned quote matches the source text despite punctuation drift.
+// normalizeForSearch lowercases, straightens curly quotes/dashes, and maps
+// newlines/tabs to spaces so a model-returned quote matches the source text
+// despite punctuation drift and OCR hard line-wraps. All replacements are
+// 1 rune → 1 rune, so rune offsets into the result match the original.
 func normalizeForSearch(s string) string {
 	replacer := strings.NewReplacer(
 		"‘", "'", "’", "'", // ‘ ’
 		"“", `"`, "”", `"`, // “ ”
 		"—", "-", "–", "-", // — –
+		"\n", " ", "\r", " ", "\t", " ", // OCR line-wraps break substring match
 	)
 	return strings.ToLower(replacer.Replace(s))
 }

@@ -128,3 +128,13 @@ func TestResolveEventTimestamps_ClampsNearEnd(t *testing.T) {
 		t.Fatalf("timestamp must clamp to leave room for the clip, got %v", got)
 	}
 }
+
+func TestResolveEventTimestamps_OCRLineWrap(t *testing.T) {
+	// OCR _djvu.txt hard-wraps lines; a quote spanning the wrap must still match.
+	text := "it was a very dubious-looking, nay, a very dark and dismal\nnight, bitingly cold and cheerless. I knew no one in the place."
+	ev := []foleyQuoteEvent{{Type: "wind", Quote: "a very dark and dismal night, bitingly cold and cheerless"}}
+	got := resolveEventTimestamps(text, 60.0, ev)
+	if len(got["wind"]) != 1 {
+		t.Fatalf("quote spanning an OCR line wrap must match, got %v", got)
+	}
+}
