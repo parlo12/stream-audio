@@ -378,9 +378,47 @@ func fetchArchiveText(identifier, textFile string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	text := strings.TrimSpace(string(body))
+	text := cleanOCRText(string(body))
 	if len(text) < 500 {
 		return "", fmt.Errorf("text too short (%d bytes) — likely a bad scan", len(text))
 	}
 	return text, nil
+}
+
+var (
+	// "beauti-\nful" → "beautiful" (lowercase→lowercase across a line break is
+	// almost always OCR hyphenation, not a real compound).
+	ocrHyphenRe = regexp.MustCompile(`([a-z])-\r?\n\s*([a-z])`)
+	// Standalone page-number lines (possibly bracketed): "47", "[ 47 ]", "- 47 -".
+	ocrPageNumRe = regexp.MustCompile(`(?m)^\s*[\[\(\-–— ]*\d{1,4}[\]\)\-–— ]*\s*$`)
+	// 3+ blank lines → one blank line.
+	ocrBlankRunRe = regexp.MustCompile(`\n{3,}`)
+)
+
+// cleanOCRText scrubs common scanner artifacts from Internet Archive _djvu.txt
+// files before they reach the TTS pipeline (audit H4): de-hyphenates words
+// split across line wraps, drops page-number-only lines and digitization
+// boilerplate, and collapses blank-line runs. Deterministic and conservative —
+// no model involved, so it can't rewrite book text.
+func cleanOCRText(text string) string {
+	text = ocrHyphenRe.ReplaceAllString(text, "$1$2")
+	text = ocrPageNumRe.ReplaceAllString(text, "")
+
+	// Drop digitization/boilerplate lines.
+	lines := strings.Split(text, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		l := strings.ToLower(strings.TrimSpace(line))
+		if strings.Contains(l, "digitized by") ||
+			strings.Contains(l, "downloaded from") ||
+			strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://") ||
+			strings.Contains(l, "archive.org") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	text = strings.Join(kept, "\n")
+
+	text = ocrBlankRunRe.ReplaceAllString(text, "\n\n")
+	return strings.TrimSpace(text)
 }

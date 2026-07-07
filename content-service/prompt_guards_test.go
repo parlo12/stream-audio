@@ -250,3 +250,42 @@ func TestDefaultCuePrompt_CoversAllMoods(t *testing.T) {
 		}
 	}
 }
+
+// ---- Phase 5: catalog fit (audit H3/H4) ----
+
+func TestCleanOCRText(t *testing.T) {
+	in := "It was a beauti-\nful morning in the har-\nbour town.\n\n47\n\n[ 48 ]\nDigitized by Google\nhttps://archive.org/details/somebook\nThe ships lay at anchor.\n\n\n\n\nAll was quiet."
+	got := cleanOCRText(in)
+	for _, want := range []string{"beautiful", "harbour", "The ships lay at anchor."} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+	for _, bad := range []string{"beauti-", "Digitized", "archive.org", "\n47\n", "[ 48 ]", "\n\n\n"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("artifact %q survived cleanup:\n%s", bad, got)
+		}
+	}
+}
+
+func TestCleanOCRText_PreservesRealNumbers(t *testing.T) {
+	in := "The year 1851 was hard.\nChapter 3 begins with 40 men on deck."
+	got := cleanOCRText(in)
+	if !strings.Contains(got, "1851") || !strings.Contains(got, "40 men") {
+		t.Fatalf("in-sentence numbers must survive:\n%s", got)
+	}
+}
+
+func TestParseAudioProfile_And_Hint(t *testing.T) {
+	p := parseAudioProfile(`{"fiction":false,"genre":"history","era":"historical"}`)
+	if p == nil || p.Fiction || p.Genre != "history" {
+		t.Fatalf("bad parse: %+v", p)
+	}
+	hint := p.promptHint(Book{Title: "Decline and Fall", Author: "Gibbon"})
+	if !strings.Contains(hint, "NONFICTION") || !strings.Contains(hint, "history") {
+		t.Fatalf("bad hint: %q", hint)
+	}
+	if parseAudioProfile("") != nil || parseAudioProfile("junk") != nil {
+		t.Fatal("empty/invalid profiles must parse to nil")
+	}
+}

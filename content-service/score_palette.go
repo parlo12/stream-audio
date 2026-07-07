@@ -325,6 +325,8 @@ func localScoreClip(bookID uint, cue ScoreCue) (string, error) {
 
 // backgroundMusicForPage is the music entry point for both transcription
 // paths: palette cue when available, legacy per-page prompt otherwise.
+// Audit H3: nonfiction always gets the soft neutral cue — no dramatic score,
+// and no per-page cue-pick call to pay for.
 func backgroundMusicForPage(book Book, pageText string) (string, error) {
 	cues, err := getOrCreateScorePalette(book)
 	if err != nil || len(cues) == 0 {
@@ -335,7 +337,10 @@ func backgroundMusicForPage(book Book, pageText string) (string, error) {
 		}
 		return getOrGenerateBackgroundMusic(prompt)
 	}
-	mood := pickCueForPage(pageText, cues)
+	mood := "neutral"
+	if getOrCreateAudioProfile(book).Fiction {
+		mood = pickCueForPage(pageText, cues)
+	}
 	cue, ok := cueForMood(cues, mood)
 	if !ok {
 		return "", errors.New("empty palette")

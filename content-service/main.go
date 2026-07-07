@@ -57,6 +57,7 @@ type Book struct {
 	CoverURL    string // Optional cover image URL for public access
 	VoiceMap     string `gorm:"type:text"` // JSON character→{gender,voice} cast (voice continuity, audit H1)
 	ScorePalette string `gorm:"type:text"` // JSON []ScoreCue — per-book music palette (audit H2)
+	AudioProfile string `gorm:"type:text"` // JSON AudioProfile — fiction/genre/era (audit H3)
 	Index       int    // Index of the book in the list
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
