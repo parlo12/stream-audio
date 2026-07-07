@@ -176,3 +176,20 @@ location /admin/queues/ {
 ```
 Credentials live in `/etc/nginx/.queues_htpasswd` (created via
 `openssl passwd -apr1`); rotate with that file + `systemctl reload nginx`.
+
+## /user/freebooks → content-service (July 6, 2026)
+
+Unified free-books search/import (Gutenberg + Internet Archive). Added to
+`sites-available/stream-audio` right above the `/user/gutenberg` block
+(timestamped backup taken):
+```nginx
+location /user/freebooks {
+    proxy_pass http://localhost:8083;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Request-ID $request_id;
+    proxy_read_timeout 180s;  # archive imports: metadata fetch + full-text download
+}
+```
