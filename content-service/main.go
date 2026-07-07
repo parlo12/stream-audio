@@ -292,8 +292,13 @@ func main() {
 
 		// Free books (Project Gutenberg catalog). NOTE: needs an nginx
 		// location /user/gutenberg → :8083.
-		authorized.GET("/gutenberg/search", SearchGutenbergHandler)   // search the free catalog
-		authorized.POST("/gutenberg/import", ImportGutenbergHandler)  // import a free book → audiobook
+		authorized.GET("/gutenberg/search", SearchGutenbergHandler)   // search the free catalog (legacy, build ≤16)
+		authorized.POST("/gutenberg/import", ImportGutenbergHandler)  // import a free book → audiobook (legacy, build ≤16)
+
+		// Unified free books (Gutenberg + Internet Archive). NOTE: needs an
+		// nginx location /user/freebooks → :8083.
+		authorized.GET("/freebooks/search", SearchFreeBooksHandler)  // merged multi-source search
+		authorized.POST("/freebooks/import", ImportFreeBookHandler)  // import {source, source_id}
 
 		// Follow graph
 		authorized.POST("/follow", FollowUserHandler)              // follow {user_id}

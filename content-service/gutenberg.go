@@ -179,6 +179,24 @@ type gutenbergResult struct {
 
 const gutenbergSearchMax = 40
 
+// searchGutenbergBooks runs the catalog full-text query (shared with the
+// unified /user/freebooks/search in freebooks.go).
+// websearch_to_tsquery handles phrases/partial words nicely; rank by
+// relevance. English-only titles dominate the catalog.
+func searchGutenbergBooks(q string, limit, offset int) ([]GutenbergBook, error) {
+	var rows []GutenbergBook
+	err := db.Raw(`
+		SELECT * FROM gutenberg_books
+		WHERE to_tsvector('english', coalesce(title,'') || ' ' || coalesce(authors,''))
+		      @@ websearch_to_tsquery('english', ?)
+		ORDER BY ts_rank(
+		    to_tsvector('english', coalesce(title,'') || ' ' || coalesce(authors,'')),
+		    websearch_to_tsquery('english', ?)
+		) DESC
+		LIMIT ? OFFSET ?`, q, q, limit, offset).Scan(&rows).Error
+	return rows, err
+}
+
 // SearchGutenbergHandler — GET /user/gutenberg/search?q=&limit=&offset=
 func SearchGutenbergHandler(c *gin.Context) {
 	q := strings.TrimSpace(c.Query("q"))
@@ -189,18 +207,7 @@ func SearchGutenbergHandler(c *gin.Context) {
 	limit := envIntQuery(c, "limit", 20, gutenbergSearchMax)
 	offset := envIntQuery(c, "offset", 0, 1_000_000)
 
-	var rows []GutenbergBook
-	// websearch_to_tsquery handles phrases/partial words nicely; rank by
-	// relevance. English-only titles dominate the catalog.
-	err := db.Raw(`
-		SELECT * FROM gutenberg_books
-		WHERE to_tsvector('english', coalesce(title,'') || ' ' || coalesce(authors,''))
-		      @@ websearch_to_tsquery('english', ?)
-		ORDER BY ts_rank(
-		    to_tsvector('english', coalesce(title,'') || ' ' || coalesce(authors,'')),
-		    websearch_to_tsquery('english', ?)
-		) DESC
-		LIMIT ? OFFSET ?`, q, q, limit, offset).Scan(&rows).Error
+	rows, err := searchGutenbergBooks(q, limit, offset)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "search failed"})
 		return
@@ -241,7 +248,17 @@ func ImportGutenbergHandler(c *gin.Context) {
 		return
 	}
 
-	// Uploads quota (Gutenberg imports count as a normal upload).
+	importTextBook(c, userID, accountType, truncate(g.Title, 250), formatAuthor(g.Authors),
+		func() (string, error) { return fetchGutenbergText(g.GutenbergID) })
+	log.Printf("📚 gutenberg: user %d imported PG#%d", userID, g.GutenbergID)
+}
+
+// importTextBook is the shared free-book import tail: quota check → Book row →
+// fetch text (source-specific) → store at the standard upload key → consume
+// upload credit → enqueue cover + parse. Writes the HTTP response itself.
+// Used by the Gutenberg import and the unified /user/freebooks/import.
+func importTextBook(c *gin.Context, userID uint, accountType, title, author string, fetchText func() (string, error)) {
+	// Uploads quota (free-book imports count as a normal upload).
 	if d := checkAndConsume(userID, accountType, "uploads", 0, 0); !d.Allowed {
 		quota429(c, d)
 		return
@@ -249,8 +266,8 @@ func ImportGutenbergHandler(c *gin.Context) {
 
 	// Create the book record up front so we have an ID for the storage key.
 	book := Book{
-		Title:    truncate(g.Title, 250),
-		Author:   formatAuthor(g.Authors),
+		Title:    title,
+		Author:   author,
 		Category: "Classics",
 		Genre:    "Classic",
 		Status:   "parsing",
@@ -261,8 +278,8 @@ func ImportGutenbergHandler(c *gin.Context) {
 		return
 	}
 
-	// Fetch the plain-text file from Gutenberg (server-side, one file only).
-	text, err := fetchGutenbergText(g.GutenbergID)
+	// Fetch the plain-text content (server-side, one file only).
+	text, err := fetchText()
 	if err != nil {
 		db.Model(&Book{}).Where("id = ?", book.ID).Update("status", "chunking_failed")
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Couldn't download this book right now. Try again."})
@@ -270,7 +287,7 @@ func ImportGutenbergHandler(c *gin.Context) {
 	}
 
 	// Write to a temp file and store at the standard upload key.
-	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("gutenberg_%d_%d.txt", userID, book.ID))
+	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("freebook_%d_%d.txt", userID, book.ID))
 	if err := os.WriteFile(tmp, []byte(text), 0o600); err != nil {
 		db.Model(&Book{}).Where("id = ?", book.ID).Update("status", "chunking_failed")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "storage error"})
@@ -289,14 +306,14 @@ func ImportGutenbergHandler(c *gin.Context) {
 	// Consume the upload credit + kick off cover fetch and parsing.
 	checkAndConsume(userID, accountType, "uploads", 1, book.ID)
 	if err := enqueueFetchCover(book.ID, book.Title, book.Author); err != nil {
-		log.Printf("⚠️ gutenberg: cover enqueue failed for book %d: %v", book.ID, err)
+		log.Printf("⚠️ freebooks: cover enqueue failed for book %d: %v", book.ID, err)
 	}
 	if err := enqueueParseBook(book.ID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not queue parsing"})
 		return
 	}
 
-	log.Printf("📚 gutenberg: user %d imported PG#%d → book %d (%s)", userID, g.GutenbergID, book.ID, book.Title)
+	log.Printf("📚 freebooks: book %d created for user %d (%s)", book.ID, userID, book.Title)
 	c.JSON(http.StatusOK, gin.H{"message": "Added to your library", "book": book})
 }
 
