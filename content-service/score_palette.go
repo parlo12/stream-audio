@@ -328,6 +328,14 @@ func localScoreClip(bookID uint, cue ScoreCue) (string, error) {
 // Audit H3: nonfiction always gets the soft neutral cue — no dramatic score,
 // and no per-page cue-pick call to pay for.
 func backgroundMusicForPage(book Book, pageText string) (string, error) {
+	// Audit H3: nonfiction never needs a palette — one globally shared soft
+	// neutral clip (the prompt-hash cache dedupes it across ALL nonfiction
+	// books), zero palette-design or cue-pick calls.
+	if !getOrCreateAudioProfile(book).Fiction {
+		log.Printf("🎼 [Palette] book %d is nonfiction — shared neutral background", book.ID)
+		return getOrGenerateBackgroundMusic(defaultCuePrompt("neutral"))
+	}
+
 	cues, err := getOrCreateScorePalette(book)
 	if err != nil || len(cues) == 0 {
 		log.Printf("🎵 [Palette] unavailable for book %d (%v) — legacy per-page music", book.ID, err)
@@ -337,10 +345,7 @@ func backgroundMusicForPage(book Book, pageText string) (string, error) {
 		}
 		return getOrGenerateBackgroundMusic(prompt)
 	}
-	mood := "neutral"
-	if getOrCreateAudioProfile(book).Fiction {
-		mood = pickCueForPage(pageText, cues)
-	}
+	mood := pickCueForPage(pageText, cues)
 	cue, ok := cueForMood(cues, mood)
 	if !ok {
 		return "", errors.New("empty palette")
