@@ -214,8 +214,9 @@ Return ONLY valid JSON, no other text or markdown.`
 			{Role: "system", Content: systemContent},
 			{Role: "user", Content: rawText},
 		},
-		Temperature: 0.3,
-		MaxTokens:   4000,
+		Temperature:    0.1, // extraction task — determinism over creativity (audit M3)
+		MaxTokens:      4000,
+		ResponseFormat: &ResponseFormat{Type: "json_object"}, // audit M1: no fence-stripping roulette
 	}
 
 	bodyBytes, _ := json.Marshal(reqBody)
@@ -244,9 +245,24 @@ Return ONLY valid JSON, no other text or markdown.`
 		return nil, errors.New("no dialogue analysis choices returned")
 	}
 
-	// Parse the JSON response
+	// narratorFallback keeps the page intact when analysis can't be trusted.
+	narratorFallback := []DialogueSegment{{
+		Type:       "narrator",
+		Speaker:    "",
+		Gender:     "",
+		Text:       rawText,
+		IsDialogue: false,
+	}}
+
+	// Audit M2: a truncated completion is a failure, not something to parse.
+	if chatResp.Choices[0].FinishReason == "length" {
+		log.Printf("⚠️ Dialogue analysis truncated (finish_reason=length), using narrator fallback")
+		return narratorFallback, nil
+	}
+
+	// Parse the JSON response (json_object mode; fence-stripping kept as belt
+	// and braces for older API behavior).
 	responseText := strings.TrimSpace(chatResp.Choices[0].Message.Content)
-	// Remove any markdown code block markers
 	responseText = strings.TrimPrefix(responseText, "```json")
 	responseText = strings.TrimPrefix(responseText, "```")
 	responseText = strings.TrimSuffix(responseText, "```")
@@ -255,18 +271,72 @@ Return ONLY valid JSON, no other text or markdown.`
 	var analysis DialogueAnalysis
 	if err := json.Unmarshal([]byte(responseText), &analysis); err != nil {
 		log.Printf("⚠️ Failed to parse dialogue analysis, using fallback: %v", err)
-		// Fallback: return entire text as narrator segment
-		return []DialogueSegment{{
-			Type:       "narrator",
-			Speaker:    "",
-			Gender:     "",
-			Text:       rawText,
-			IsDialogue: false,
-		}}, nil
+		return narratorFallback, nil
+	}
+
+	// Audit C1: GPT must not drop or rewrite book text. Verify the segments
+	// collectively reproduce the input; on drift, narrate the original intact.
+	if !segmentsCoverInput(rawText, analysis.Segments) {
+		log.Printf("⚠️ Dialogue analysis altered/dropped text (coverage < %.0f%%), using narrator fallback", segmentCoverageMin*100)
+		return narratorFallback, nil
 	}
 
 	log.Printf("🎭 Analyzed dialogue: %d segments found", len(analysis.Segments))
 	return analysis.Segments, nil
+}
+
+// segmentCoverageMin is the minimum word-level overlap between the input text
+// and the concatenated dialogue segments for the analysis to be trusted.
+const segmentCoverageMin = 0.98
+
+// wordCounts lowercases s and counts alphanumeric word occurrences.
+func wordCounts(s string) map[string]int {
+	counts := map[string]int{}
+	var b strings.Builder
+	flush := func() {
+		if b.Len() > 0 {
+			counts[b.String()]++
+			b.Reset()
+		}
+	}
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	return counts
+}
+
+// segmentsCoverInput reports whether the segment texts collectively contain at
+// least segmentCoverageMin of the input's words (frequency-aware). This guards
+// against the model silently dropping sentences or paraphrasing book text
+// during dialogue analysis (audit C1). Punctuation/quote changes are ignored —
+// only word content counts.
+func segmentsCoverInput(input string, segs []DialogueSegment) bool {
+	in := wordCounts(input)
+	var joined strings.Builder
+	for _, s := range segs {
+		joined.WriteString(s.Text)
+		joined.WriteByte(' ')
+	}
+	out := wordCounts(joined.String())
+
+	total, matched := 0, 0
+	for w, c := range in {
+		total += c
+		if oc := out[w]; oc < c {
+			matched += oc
+		} else {
+			matched += c
+		}
+	}
+	if total == 0 {
+		return true
+	}
+	return float64(matched)/float64(total) >= segmentCoverageMin
 }
 
 // getVoiceForSegment returns the appropriate voice based on segment type and gender

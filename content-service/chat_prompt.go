@@ -32,10 +32,13 @@ type ResponseFormat struct {
 	Type string `json:"type"` // "json_object" or "text"
 }
 
-// ChatResponse models the subset of the response we need.
+// ChatResponse models the subset of the response we need. FinishReason lets
+// callers detect max_tokens truncation ("length") and treat it as a failure
+// instead of parsing a cut-off tail (audit M2).
 type ChatResponse struct {
 	Choices []struct {
-		Message ChatMessage `json:"message"`
+		Message      ChatMessage `json:"message"`
+		FinishReason string      `json:"finish_reason"`
 	} `json:"choices"`
 }
 
@@ -61,7 +64,7 @@ func generateOverallSoundPrompt(pageText string) (string, error) {
 	reqPayload := ChatRequest{
 		Model:       "gpt-4o",
 		Messages:    []ChatMessage{{Role: "system", Content: "You are an audio production assistant."}, {Role: "user", Content: userContent}},
-		MaxTokens:   100,
+		MaxTokens:   120, // audit M2: 100 truncated mid-sentence on wordy outputs
 		Temperature: 0.7,
 	}
 	bodyBytes, err := json.Marshal(reqPayload)
@@ -101,9 +104,15 @@ func generateOverallSoundPrompt(pageText string) (string, error) {
 	}
 
 	output := strings.TrimSpace(chatResp.Choices[0].Message.Content)
-	// enforce 300-char limit
-	if len(output) > 300 {
-		output = output[:300]
+	// Enforce the 300-char limit rune-safely, cutting at a word boundary so
+	// ElevenLabs never receives a half-word (audit M2: the old byte slice
+	// could split mid-word and mid-UTF-8-rune).
+	if r := []rune(output); len(r) > 300 {
+		cut := string(r[:300])
+		if i := strings.LastIndex(cut, " "); i > 200 {
+			cut = cut[:i]
+		}
+		output = strings.TrimSpace(cut)
 	}
 	return output, nil
 }
