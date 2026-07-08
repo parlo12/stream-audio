@@ -290,6 +290,26 @@ func TestParseAudioProfile_And_Hint(t *testing.T) {
 	}
 }
 
+func TestStripVerseCitations(t *testing.T) {
+	in := "Genesis 1:17\tAnd God set them in the firmament\nGenesis 1:18\tAnd to rule over the day\n1 Samuel 3:4\tThat the LORD called Samuel\nSong of Solomon 2:1\tI am the rose of Sharon"
+	got := stripVerseCitations(in)
+	for _, banned := range []string{"1:17", "1:18", "3:4", "2:1", "Genesis", "Samuel", "Solomon"} {
+		if strings.Contains(got, banned) {
+			t.Fatalf("citation fragment %q survived: %q", banned, got)
+		}
+	}
+	for _, kept := range []string{"And God set them", "rule over the day", "LORD called Samuel", "rose of Sharon"} {
+		if !strings.Contains(got, kept) {
+			t.Fatalf("verse text %q lost: %q", kept, got)
+		}
+	}
+	// prose without tab-separated citations is untouched, even with times
+	prose := "The train left at 12:30 that day.\nShe said, \"wait for me.\""
+	if stripVerseCitations(prose) != prose {
+		t.Fatalf("prose was altered: %q", stripVerseCitations(prose))
+	}
+}
+
 func TestPickVoice_NamedUnknownsGetDistinctVoices(t *testing.T) {
 	vm := map[string]CharacterVoice{}
 	segs := []DialogueSegment{

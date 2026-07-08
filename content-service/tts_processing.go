@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -191,6 +192,19 @@ func truncateLog(s string, maxLen int) string {
 // segments. Phase 3 (audit H1): the known cast and the tail of the previous
 // chunk are provided so speaker names stay canonical across chunks and
 // "she replied" can be attributed even when the antecedent was on the prior
+// verseCitationRe matches per-line verse citations like "Genesis 1:17\t" or
+// "1 Samuel 3:4\t" — a short book-name prefix plus chapter:verse followed by
+// a tab, the layout of common plain-text Bible editions. Citations are
+// metadata: the dialogue model rightly drops them (tripping the coverage
+// guard) and the narrator should never read them aloud.
+var verseCitationRe = regexp.MustCompile(`(?m)^[^\t\n]{0,40}?\b\d{1,3}:\d{1,3}\t`)
+
+// stripVerseCitations removes verse-citation prefixes from TTS input. Only
+// applied to classical-speech books (see usesClassicalSpeech).
+func stripVerseCitations(text string) string {
+	return verseCitationRe.ReplaceAllString(text, "")
+}
+
 // page. Pass empty cast/prevTail for context-free analysis. classicalSpeech
 // relaxes the quotes-only rule for scripture/epics (see usesClassicalSpeech).
 func analyzeDialogue(rawText, prevTail string, cast map[string]CharacterVoice, classicalSpeech bool) ([]DialogueSegment, error) {
@@ -586,6 +600,12 @@ func convertTextToAudioMultiVoice(text string, audioID uint, bookID uint, prevTa
 		if err := db.First(&book, bookID).Error; err == nil {
 			classical = usesClassicalSpeech(getOrCreateAudioProfile(book), book)
 		}
+	}
+	if classical {
+		// Verse citations ("Genesis 1:17\t") are metadata — never narrated,
+		// and stripping them BEFORE analysis keeps the coverage guard honest.
+		text = stripVerseCitations(text)
+		prevTail = stripVerseCitations(prevTail)
 	}
 
 	// Step 1: Analyze dialogue to identify speakers and genders
