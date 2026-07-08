@@ -290,6 +290,23 @@ func TestParseAudioProfile_And_Hint(t *testing.T) {
 	}
 }
 
+func TestUsesClassicalSpeech(t *testing.T) {
+	bible := &AudioProfile{Fiction: true, Genre: "religious", Era: "ancient"}
+	iliad := &AudioProfile{Fiction: true, Genre: "epic poetry", Era: "ancient"}
+	scifi := &AudioProfile{Fiction: true, Genre: "science fiction", Era: "futuristic"}
+	memoir := &AudioProfile{Fiction: false, Genre: "memoir", Era: "modern"}
+	if !usesClassicalSpeech(bible, Book{}) || !usesClassicalSpeech(iliad, Book{}) {
+		t.Fatal("scripture/epic must use classical speech rules")
+	}
+	if usesClassicalSpeech(scifi, Book{}) || usesClassicalSpeech(memoir, Book{}) {
+		t.Fatal("modern books must keep quote-only rules")
+	}
+	// catalog fields count even when the classifier genre is bland
+	if !usesClassicalSpeech(memoir, Book{Genre: "Norse Mythology"}) {
+		t.Fatal("catalog genre must trigger classical speech")
+	}
+}
+
 func TestIsCinematicGenre(t *testing.T) {
 	cinematic := [][]string{
 		{"religious"},               // Bible via classifier

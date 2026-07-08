@@ -191,8 +191,9 @@ func truncateLog(s string, maxLen int) string {
 // segments. Phase 3 (audit H1): the known cast and the tail of the previous
 // chunk are provided so speaker names stay canonical across chunks and
 // "she replied" can be attributed even when the antecedent was on the prior
-// page. Pass empty cast/prevTail for context-free analysis.
-func analyzeDialogue(rawText, prevTail string, cast map[string]CharacterVoice) ([]DialogueSegment, error) {
+// page. Pass empty cast/prevTail for context-free analysis. classicalSpeech
+// relaxes the quotes-only rule for scripture/epics (see usesClassicalSpeech).
+func analyzeDialogue(rawText, prevTail string, cast map[string]CharacterVoice, classicalSpeech bool) ([]DialogueSegment, error) {
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
 		return nil, errors.New("OPENAI_API_KEY not set")
@@ -220,6 +221,13 @@ Return a JSON object with this exact structure:
 }
 
 Return ONLY valid JSON, no other text or markdown.`
+
+	if classicalSpeech {
+		systemContent += `
+
+ADDITIONAL RULE for this book (takes precedence over rule 9 for reporting-verb speech):
+10. This text uses classical/scriptural conventions: direct speech often appears WITHOUT quotation marks, introduced by a reporting verb and a comma or colon. Example: "And God said, Let there be light" splits into narrator segment "And God said," followed by dialogue segment (speaker "God") "Let there be light". Attribute such unquoted direct speech to its speaker. Indirect/reported speech ("he said that he would go", "the LORD commanded him to leave") is still narration.`
+	}
 
 	var user strings.Builder
 	user.WriteString("KNOWN CHARACTERS in this book so far (reuse these exact speaker names):\n")
@@ -569,8 +577,19 @@ func convertTextToAudioMultiVoice(text string, audioID uint, bookID uint, prevTa
 		vm = map[string]CharacterVoice{}
 	}
 
+	// Scripture/epics carry unquoted direct speech ("And God said, …") that
+	// the quote-based rules would read as narration; gate the relaxed rule on
+	// the book's audio profile so modern prose is untouched.
+	classical := false
+	if bookID != 0 {
+		var book Book
+		if err := db.First(&book, bookID).Error; err == nil {
+			classical = usesClassicalSpeech(getOrCreateAudioProfile(book), book)
+		}
+	}
+
 	// Step 1: Analyze dialogue to identify speakers and genders
-	segments, err := analyzeDialogue(text, prevTail, vm)
+	segments, err := analyzeDialogue(text, prevTail, vm, classical)
 	if err != nil {
 		log.Printf("⚠️ Dialogue analysis failed, falling back to single voice: %v", err)
 		return convertTextToAudioSingleVoice(text, audioID)

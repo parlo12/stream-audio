@@ -40,6 +40,15 @@ var cinematicGenreMarkers = []string{
 	"religio", "scripture", "bible", "myth", "epic", "folklore", "legend", "saga",
 }
 
+// usesClassicalSpeech reports whether dialogue analysis should expect
+// unquoted direct speech introduced by a reporting verb ("And God said,
+// Let there be light"). Scripture/myth (the narrative-nonfiction set) and
+// ancient-era works (Homer, sagas) conventionally omit quotation marks in
+// translation; modern books keep the quote-based rules untouched.
+func usesClassicalSpeech(p *AudioProfile, book Book) bool {
+	return isCinematicGenre(p.Genre, book.Genre, book.Category) || p.Era == "ancient"
+}
+
 // isCinematicGenre reports whether any of the given genre/category strings
 // marks a narrative-nonfiction work that should keep full sound design.
 func isCinematicGenre(fields ...string) bool {
