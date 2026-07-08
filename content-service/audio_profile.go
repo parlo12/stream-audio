@@ -31,6 +31,29 @@ var validEras = map[string]bool{
 	"modern": true, "futuristic": true,
 }
 
+// cinematicGenreMarkers: nonfiction genres that still deserve the full
+// cinematic treatment. Scripture, myth, and epic are narrative texts —
+// characters, dialogue, storms, battles — even when shelved as nonfiction;
+// without this the Bible gets the flat documentary path (no Foley, neutral
+// music only). Substring-matched against classifier and catalog genre fields.
+var cinematicGenreMarkers = []string{
+	"religio", "scripture", "bible", "myth", "epic", "folklore", "legend", "saga",
+}
+
+// isCinematicGenre reports whether any of the given genre/category strings
+// marks a narrative-nonfiction work that should keep full sound design.
+func isCinematicGenre(fields ...string) bool {
+	for _, f := range fields {
+		f = strings.ToLower(f)
+		for _, m := range cinematicGenreMarkers {
+			if strings.Contains(f, m) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // defaultAudioProfile fails open to today's behavior (full sound design).
 func defaultAudioProfile() *AudioProfile {
 	return &AudioProfile{Fiction: true, Genre: "", Era: ""}
@@ -145,6 +168,10 @@ func getOrCreateAudioProfile(book Book) *AudioProfile {
 	if err != nil {
 		log.Printf("⚠️ [AudioProfile] classify failed for book %d: %v — defaulting to fiction", book.ID, err)
 		return defaultAudioProfile()
+	}
+	if !p.Fiction && isCinematicGenre(p.Genre, book.Genre, book.Category) {
+		log.Printf("🎬 [AudioProfile] Book %d: nonfiction genre %q gets cinematic treatment (narrative-nonfiction exception)", book.ID, p.Genre)
+		p.Fiction = true
 	}
 	data, _ := json.Marshal(p)
 	if err := db.Model(&Book{}).Where("id = ?", book.ID).Update("audio_profile", string(data)).Error; err != nil {

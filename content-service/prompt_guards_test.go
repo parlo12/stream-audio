@@ -289,3 +289,32 @@ func TestParseAudioProfile_And_Hint(t *testing.T) {
 		t.Fatal("empty/invalid profiles must parse to nil")
 	}
 }
+
+func TestIsCinematicGenre(t *testing.T) {
+	cinematic := [][]string{
+		{"religious"},               // Bible via classifier
+		{"religion"},                // variant wording
+		{"scripture", ""},           // explicit
+		{"mythology"},               // Edda, Bulfinch
+		{"epic poetry"},             // Iliad shelved as poetry/nonfiction
+		{"", "Folklore & Legends"},  // catalog category, mixed case
+		{"history", "Norse Sagas"},  // classifier says history, catalog knows better
+	}
+	for _, fields := range cinematic {
+		if !isCinematicGenre(fields...) {
+			t.Errorf("expected cinematic: %v", fields)
+		}
+	}
+	flat := [][]string{
+		{"history"},
+		{"biography", ""},
+		{"self-help"},
+		{"business", "Reference"},
+		{""},
+	}
+	for _, fields := range flat {
+		if isCinematicGenre(fields...) {
+			t.Errorf("expected NOT cinematic: %v", fields)
+		}
+	}
+}
