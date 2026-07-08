@@ -1371,7 +1371,13 @@ func processSoundEffectsAndMerge(book Book, hash string, pageIndexes []int) {
 		}
 		if err := db.Model(&BookChunk{}).
 			Where("book_id = ? AND \"index\" = ?", book.ID, idx).
-			Update("final_audio_path", key).Error; err != nil {
+			Updates(map[string]interface{}{
+				// Clearing hls_path lets the follow-on packager re-package —
+				// its already-packaged guard would otherwise keep serving the
+				// old playlist after a re-render.
+				"final_audio_path": key,
+				"hls_path":         "",
+			}).Error; err != nil {
 			log.Printf("❌ Failed to update final_audio_path for book_id=%d page=%d: %v", book.ID, idx, err)
 		} else {
 			log.Printf("✅ Updated final_audio_path for book_id=%d page=%d → %s", book.ID, idx, key)

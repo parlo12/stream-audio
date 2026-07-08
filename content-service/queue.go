@@ -260,6 +260,10 @@ func transcribePage(book Book, chunk BookChunk, userID uint, accountType string)
 		"audio_path":       key,
 		"final_audio_path": key,
 		"tts_status":       "completed",
+		// New final audio invalidates any previously packaged HLS — the
+		// packager's already-packaged guard would otherwise keep serving the
+		// old playlist after a re-render.
+		"hls_path": "",
 	})
 	// Follow-on: package this page as HLS (non-blocking — doesn't gate playback).
 	if err := enqueueHLSPackage(book.ID, chunk.Index); err != nil {
