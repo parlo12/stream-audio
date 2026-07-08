@@ -290,6 +290,24 @@ func TestParseAudioProfile_And_Hint(t *testing.T) {
 	}
 }
 
+func TestPickVoice_NamedUnknownsGetDistinctVoices(t *testing.T) {
+	vm := map[string]CharacterVoice{}
+	segs := []DialogueSegment{
+		{IsDialogue: true, Speaker: "God", Gender: "unknown", Text: "Let there be light"},
+		{IsDialogue: true, Speaker: "Serpent", Gender: "unknown", Text: "Ye shall not surely die"},
+	}
+	assignSegmentVoices(vm, segs)
+	if segs[0].Voice == segs[1].Voice {
+		t.Fatalf("God and Serpent must not share a voice: both %q", segs[0].Voice)
+	}
+	// unnamed speech still falls back to the shared unknown voice
+	anon := []DialogueSegment{{IsDialogue: true, Speaker: "", Gender: "unknown", Text: "hello"}}
+	assignSegmentVoices(vm, anon)
+	if anon[0].Voice != unknownDialogueVoice {
+		t.Fatalf("unnamed speaker should use %q, got %q", unknownDialogueVoice, anon[0].Voice)
+	}
+}
+
 func TestUsesClassicalSpeech(t *testing.T) {
 	bible := &AudioProfile{Fiction: true, Genre: "religious", Era: "ancient"}
 	iliad := &AudioProfile{Fiction: true, Genre: "epic poetry", Era: "ancient"}

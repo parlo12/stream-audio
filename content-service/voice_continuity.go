@@ -29,9 +29,14 @@ type CharacterVoice struct {
 var (
 	maleVoicePool   = []string{"onyx", "echo", "ash"}
 	femaleVoicePool = []string{"nova", "shimmer", "coral"}
+	// unknownVoicePool serves NAMED characters whose gender the model can't
+	// determine (God, the Serpent, "the voice"). Without it they all collapsed
+	// onto the single fallback voice and sounded identical in the same scene.
+	// Uses the gpt-4o-mini-tts voices unused by narrator/male/female pools.
+	unknownVoicePool = []string{"fable", "verse", "ballad", "sage"}
 )
 
-// unknownDialogueVoice is used for dialogue whose speaker gender is unknown —
+// unknownDialogueVoice is used for dialogue with NO attributable speaker —
 // distinct from the narrator so conversations don't collapse into narration
 // (the old behavior sent unknown-gender dialogue to the narrator voice).
 const unknownDialogueVoice = "fable"
@@ -78,7 +83,7 @@ func pickVoice(vm map[string]CharacterVoice, gender string) string {
 	case "female":
 		pool = femaleVoicePool
 	default:
-		return unknownDialogueVoice
+		pool = unknownVoicePool
 	}
 	inPool := map[string]bool{}
 	for _, v := range pool {
