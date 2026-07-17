@@ -84,6 +84,7 @@ type BookChunk struct {
 	AudioPath      string `gorm:"not null"`
 	FinalAudioPath string `json:"final_audio_path"` // 👈 New field
 	HLSPath        string `json:"hls_path"`         // R2 key of the HLS playlist (Phase 5C)
+	TimingMap      string `gorm:"type:text" json:"-"` // segment rune-span → seconds table (audit 2B)
 	TTSStatus      string // values: "pending", "processing", "completed", "failed"
 	StartTime      int64  // Start time in seconds
 	EndTime        int64  // End time in seconds

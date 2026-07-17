@@ -1018,7 +1018,7 @@ func normalizeForSearch(s string) string {
 // locate each quote in the page text, convert its rune offset to a time by
 // proportion of the narration duration. Quotes that can't be found are DROPPED
 // — a missing effect beats a fabricated placement (audit C2, Phase A).
-func resolveEventTimestamps(text string, ttsDur float64, evs []foleyQuoteEvent) EventMap {
+func resolveEventTimestamps(text string, ttsDur float64, evs []foleyQuoteEvent, tm []SegmentTiming) EventMap {
 	out := EventMap{}
 	haystack := normalizeForSearch(text)
 	totalRunes := utf8.RuneCountInString(haystack)
@@ -1050,7 +1050,9 @@ func resolveEventTimestamps(text string, ttsDur float64, evs []foleyQuoteEvent) 
 			continue
 		}
 		runeOff := utf8.RuneCountInString(haystack[:idx])
-		t := float64(runeOff) / float64(totalRunes) * ttsDur
+		// Audit 2B: interpolate inside the containing TTS segment when a
+		// timing map exists; whole-page proportional otherwise.
+		t := timeForRuneOffset(tm, runeOff, totalRunes, ttsDur)
 		if t > ttsDur-0.5 {
 			t = math.Max(0, ttsDur-0.5)
 		}
@@ -1064,7 +1066,7 @@ func resolveEventTimestamps(text string, ttsDur float64, evs []foleyQuoteEvent) 
 // anchors them to the timeline via their trigger quotes (audit C2). The full
 // page text is analyzed — the old 800-char cap placed effects across audio it
 // had never seen.
-func extractSoundEvents(excerpt string, ttsDur float64, bookHint string) (EventMap, error) {
+func extractSoundEvents(excerpt string, ttsDur float64, bookHint string, tm []SegmentTiming) (EventMap, error) {
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
 		return nil, errors.New("OPENAI_API_KEY not set")
@@ -1164,7 +1166,7 @@ Return ONLY a JSON object:
 	}
 
 	// Anchor each event to the timeline via its quote (audit C2, Phase A).
-	validEvents := resolveEventTimestamps(excerpt, ttsDur, wrap.Events)
+	validEvents := resolveEventTimestamps(excerpt, ttsDur, wrap.Events, tm)
 	log.Printf("🎬 [Foley Analysis] %d events anchored (%d proposed)", len(validEvents), len(wrap.Events))
 	return validEvents, nil
 }
@@ -1181,14 +1183,25 @@ func ambientLibKey(setting string) string { return "library/ambient/" + setting 
 // library-cached clips. Fail-open: any error returns the input mix unchanged.
 // Shared by the on-demand path (processSoundEffectsAndMerge) and the batch
 // path (transcribePage).
-func applyFoleyOverlay(mixedPath, ttsPath string, book Book, pageIndex int, content string) string {
+func applyFoleyOverlay(mixedPath, ttsPath string, book Book, chunk BookChunk) string {
+	pageIndex := chunk.Index
 	profile := getOrCreateAudioProfile(book)
 	if !profile.Fiction {
 		log.Printf("📖 [Foley] Skipping (nonfiction) for book %d page %d", book.ID, pageIndex)
 		return mixedPath
 	}
+	// Anchor quotes in the text TTS actually spoke: classical books have
+	// verse citations stripped before synthesis, so strip here too or every
+	// offset past the first citation drifts late.
+	content := chunk.Content
+	if usesClassicalSpeech(profile, book) {
+		content = stripVerseCitations(content)
+	}
 	ttsDur, _ := getTTSDuration(ttsPath)
-	events, err := extractSoundEvents(content, ttsDur, profile.promptHint(book))
+	// Audit 2B: per-segment timing map (persisted at TTS time) makes quote
+	// anchors respect real speaking rates; nil → proportional fallback.
+	tm := loadTimingMap(book.ID, pageIndex)
+	events, err := extractSoundEvents(content, ttsDur, profile.promptHint(book), tm)
 	if err != nil {
 		log.Printf("⚠️ [Foley] extract failed for book %d page %d: %v", book.ID, pageIndex, err)
 		return mixedPath
@@ -1368,7 +1381,7 @@ func processSoundEffectsAndMerge(book Book, hash string, pageIndexes []int) {
 		// Extract & overlay sound effects (Q1: this page's text). Shared
 		// helper — the batch path (transcribePage) runs the same pass since
 		// the Foley-on-batch decision (July 2026).
-		mixedPath = applyFoleyOverlay(mixedPath, ttsLocal, book, idx, chunk.Content)
+		mixedPath = applyFoleyOverlay(mixedPath, ttsLocal, book, chunk)
 		cleanupTTS() // TTS input no longer needed
 
 		// Upload the finished page audio to R2 and store its object key.

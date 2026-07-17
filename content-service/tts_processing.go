@@ -627,6 +627,8 @@ func convertTextToAudioMultiVoice(text string, audioID uint, bookID uint, prevTa
 
 	// Step 2: Generate audio for each segment
 	var segmentPaths []string
+	segTexts := []string{} // spoken text per rendered segment (timing map, audit 2B)
+	segDurs := []float64{} // measured duration per rendered segment
 	for i, segment := range segments {
 		if strings.TrimSpace(segment.Text) == "" {
 			continue
@@ -639,6 +641,16 @@ func convertTextToAudioMultiVoice(text string, audioID uint, bookID uint, prevTa
 		}
 		if path != "" {
 			segmentPaths = append(segmentPaths, path)
+			if segTexts != nil {
+				if d, derr := getTTSDuration(path); derr == nil && d > 0 {
+					segTexts = append(segTexts, segment.Text)
+					segDurs = append(segDurs, d)
+				} else {
+					// One unmeasured segment would misalign every later span —
+					// drop the whole map; Foley falls back to proportional.
+					segTexts, segDurs = nil, nil
+				}
+			}
 		}
 	}
 
@@ -665,6 +677,13 @@ func convertTextToAudioMultiVoice(text string, audioID uint, bookID uint, prevTa
 	// Clean up individual segment files
 	for _, path := range segmentPaths {
 		os.Remove(path)
+	}
+
+	// Persist the segment timing map (audioID is the chunk ID on the chunk
+	// path; bookID==0 is the legacy context-free path — skip).
+	if bookID != 0 && len(segTexts) > 0 {
+		saveTimingMap(audioID, buildTimingMap(segTexts, segDurs))
+		log.Printf("🕐 [Timing] chunk %d: %d-segment timing map saved", audioID, len(segTexts))
 	}
 
 	log.Printf("✅ Multi-voice TTS completed for audio %d: %s", audioID, finalPath)

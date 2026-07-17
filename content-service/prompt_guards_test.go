@@ -92,7 +92,7 @@ func TestResolveEventTimestamps_AnchorsProportionally(t *testing.T) {
 	// Quote sits at the midpoint of the text → timestamp ≈ half the duration.
 	text := "aaaa aaaa aaaa aaaa aaaa the door groaned open bbbb bbbb bbbb bbbb bbbb bbbb"
 	ev := []foleyQuoteEvent{{Type: "door_creak", Quote: "the door groaned open"}}
-	got := resolveEventTimestamps(text, 100.0, ev)
+	got := resolveEventTimestamps(text, 100.0, ev, nil)
 	ts, ok := got["door_creak"]
 	if !ok || len(ts) != 1 {
 		t.Fatalf("expected one door_creak timestamp, got %v", got)
@@ -105,7 +105,7 @@ func TestResolveEventTimestamps_AnchorsProportionally(t *testing.T) {
 func TestResolveEventTimestamps_CurlyQuoteDrift(t *testing.T) {
 	text := `He said “who goes there” — and drew his sword from its sheath.`
 	ev := []foleyQuoteEvent{{Type: "sword_draw", Quote: `drew his sword from its sheath`}}
-	got := resolveEventTimestamps(text, 60.0, ev)
+	got := resolveEventTimestamps(text, 60.0, ev, nil)
 	if len(got["sword_draw"]) != 1 {
 		t.Fatalf("curly-quote text should still match, got %v", got)
 	}
@@ -117,7 +117,7 @@ func TestResolveEventTimestamps_UnfoundQuoteDropped(t *testing.T) {
 		{Type: "explosion", Quote: "the building erupted in flames"}, // not in text
 		{Type: "not_a_real_event", Quote: "quiet afternoon"},         // invalid type
 	}
-	got := resolveEventTimestamps(text, 30.0, ev)
+	got := resolveEventTimestamps(text, 30.0, ev, nil)
 	if len(got) != 0 {
 		t.Fatalf("hallucinated/invalid events must be dropped, got %v", got)
 	}
@@ -126,7 +126,7 @@ func TestResolveEventTimestamps_UnfoundQuoteDropped(t *testing.T) {
 func TestResolveEventTimestamps_ClampsNearEnd(t *testing.T) {
 	text := "Silence. Then thunder rolled."
 	ev := []foleyQuoteEvent{{Type: "thunder", Quote: "thunder rolled."}}
-	got := resolveEventTimestamps(text, 10.0, ev)
+	got := resolveEventTimestamps(text, 10.0, ev, nil)
 	if len(got["thunder"]) != 1 || got["thunder"][0] > 9.5 {
 		t.Fatalf("timestamp must clamp to leave room for the clip, got %v", got)
 	}
@@ -136,7 +136,7 @@ func TestResolveEventTimestamps_OCRLineWrap(t *testing.T) {
 	// OCR _djvu.txt hard-wraps lines; a quote spanning the wrap must still match.
 	text := "it was a very dubious-looking, nay, a very dark and dismal\nnight, bitingly cold and cheerless. I knew no one in the place."
 	ev := []foleyQuoteEvent{{Type: "wind", Quote: "a very dark and dismal night, bitingly cold and cheerless"}}
-	got := resolveEventTimestamps(text, 60.0, ev)
+	got := resolveEventTimestamps(text, 60.0, ev, nil)
 	if len(got["wind"]) != 1 {
 		t.Fatalf("quote spanning an OCR line wrap must match, got %v", got)
 	}
@@ -287,6 +287,53 @@ func TestParseAudioProfile_And_Hint(t *testing.T) {
 	}
 	if parseAudioProfile("") != nil || parseAudioProfile("junk") != nil {
 		t.Fatal("empty/invalid profiles must parse to nil")
+	}
+}
+
+func TestBuildTimingMap_CumulativeSpans(t *testing.T) {
+	tm := buildTimingMap(
+		[]string{"abcd", "efghij", "kl"},         // 4, 6, 2 runes (+1 join each)
+		[]float64{2.0, 6.0, 1.0},
+	)
+	if len(tm) != 3 {
+		t.Fatalf("want 3 spans, got %d", len(tm))
+	}
+	if tm[1].StartRune != 5 || tm[1].EndRune != 12 {
+		t.Fatalf("segment 2 rune span wrong: %+v", tm[1])
+	}
+	if tm[2].StartSec != 8.0 || tm[2].EndSec != 9.0 {
+		t.Fatalf("segment 3 time span wrong: %+v", tm[2])
+	}
+	if buildTimingMap(nil, nil) != nil || buildTimingMap([]string{"a"}, nil) != nil {
+		t.Fatal("mismatched/empty inputs must produce nil map")
+	}
+}
+
+func TestTimeForRuneOffset_InterpolatesWithinSegment(t *testing.T) {
+	// Segment 1: runes 0-10 over 0-2s (fast). Segment 2: runes 10-20 over
+	// 2-12s (slow). Proportional mapping would put rune 15 at 7.5s of a 10s
+	// page — the map must place it mid-segment-2 at 7s.
+	tm := []SegmentTiming{
+		{StartRune: 0, EndRune: 10, StartSec: 0, EndSec: 2},
+		{StartRune: 10, EndRune: 20, StartSec: 2, EndSec: 12},
+	}
+	if got := timeForRuneOffset(tm, 15, 20, 12.0); got != 7.0 {
+		t.Fatalf("rune 15: want 7.0s, got %.2f", got)
+	}
+	if got := timeForRuneOffset(tm, 0, 20, 12.0); got != 0 {
+		t.Fatalf("rune 0: want 0s, got %.2f", got)
+	}
+	// Past the end clamps to the last segment's end.
+	if got := timeForRuneOffset(tm, 25, 20, 12.0); got != 12.0 {
+		t.Fatalf("past-end: want 12.0s, got %.2f", got)
+	}
+	// No map: legacy proportional.
+	if got := timeForRuneOffset(nil, 15, 20, 12.0); got != 9.0 {
+		t.Fatalf("proportional fallback: want 9.0s, got %.2f", got)
+	}
+	// Searched-text length differs from map span: offsets rescale.
+	if got := timeForRuneOffset(tm, 30, 40, 12.0); got != 7.0 {
+		t.Fatalf("rescaled rune 30/40: want 7.0s, got %.2f", got)
 	}
 }
 
