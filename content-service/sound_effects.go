@@ -1176,6 +1176,32 @@ Return ONLY a JSON object:
 func foleyLibKey(eventType string) string { return "library/foley/" + eventType + ".mp3" }
 func ambientLibKey(setting string) string { return "library/ambient/" + setting + ".mp3" }
 
+// applyFoleyOverlay runs the fiction-only Foley pass (audit H3) on a mixed
+// page: extract quote-anchored events from the page text and overlay the
+// library-cached clips. Fail-open: any error returns the input mix unchanged.
+// Shared by the on-demand path (processSoundEffectsAndMerge) and the batch
+// path (transcribePage).
+func applyFoleyOverlay(mixedPath, ttsPath string, book Book, pageIndex int, content string) string {
+	profile := getOrCreateAudioProfile(book)
+	if !profile.Fiction {
+		log.Printf("📖 [Foley] Skipping (nonfiction) for book %d page %d", book.ID, pageIndex)
+		return mixedPath
+	}
+	ttsDur, _ := getTTSDuration(ttsPath)
+	events, err := extractSoundEvents(content, ttsDur, profile.promptHint(book))
+	if err != nil {
+		log.Printf("⚠️ [Foley] extract failed for book %d page %d: %v", book.ID, pageIndex, err)
+		return mixedPath
+	}
+	fxPath, err := overlaySoundEvents(mixedPath, events, book, pageIndex)
+	if err != nil {
+		log.Printf("⚠️ overlaySoundEvents failed for index %d: %v", pageIndex, err)
+		return mixedPath
+	}
+	log.Printf("✅ Sound effects overlayed: %s", fxPath)
+	return fxPath
+}
+
 // fetchFromLibrary tries to satisfy a clip from the persistent R2 library.
 func fetchFromLibrary(key, localPath string) bool {
 	if store == nil {
@@ -1339,28 +1365,11 @@ func processSoundEffectsAndMerge(book Book, hash string, pageIndexes []int) {
 			continue
 		}
 
-		// Extract & overlay sound effects (Q1: this page's text).
-		// Audit H3: nonfiction gets no Foley at all.
-		ttsDur, _ := getTTSDuration(ttsLocal)
+		// Extract & overlay sound effects (Q1: this page's text). Shared
+		// helper — the batch path (transcribePage) runs the same pass since
+		// the Foley-on-batch decision (July 2026).
+		mixedPath = applyFoleyOverlay(mixedPath, ttsLocal, book, idx, chunk.Content)
 		cleanupTTS() // TTS input no longer needed
-		profile := getOrCreateAudioProfile(book)
-		var events EventMap
-		err = nil
-		if profile.Fiction {
-			events, err = extractSoundEvents(chunk.Content, ttsDur, profile.promptHint(book))
-		} else {
-			log.Printf("📖 [Foley] Skipping (nonfiction) for book %d page %d", book.ID, idx)
-			events = EventMap{}
-		}
-		if err == nil {
-			fxPath, err := overlaySoundEvents(mixedPath, events, book, idx)
-			if err != nil {
-				log.Printf("⚠️ overlaySoundEvents failed for index %d: %v", idx, err)
-			} else {
-				log.Printf("✅ Sound effects overlayed: %s", fxPath)
-				mixedPath = fxPath // Use the new path with effects
-			}
-		}
 
 		// Upload the finished page audio to R2 and store its object key.
 		key, uerr := uploadArtifact(context.Background(), mixedPath,

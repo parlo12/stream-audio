@@ -250,6 +250,10 @@ func transcribePage(book Book, chunk BookChunk, userID uint, accountType string)
 		fail()
 		return err
 	}
+	// Foley on the batch path too (decision after audit §4 gap): same
+	// treatment as on-demand pages. Library-cached clips make this ~one
+	// gpt-4o-mini call per fiction page; nonfiction skips inside.
+	mergedAudio = applyFoleyOverlay(mergedAudio, audioPath, book, chunk.Index, chunk.Content)
 	key, err := uploadArtifact(context.Background(), mergedAudio,
 		audioPageKey(book.ID, chunk.Index, hash, filepath.Ext(mergedAudio)))
 	if err != nil {
