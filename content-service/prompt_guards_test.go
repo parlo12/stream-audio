@@ -151,7 +151,7 @@ func TestAssignSegmentVoices_StableAcrossChunks(t *testing.T) {
 		{Type: "dialogue", Speaker: "Elizabeth", Gender: "female", IsDialogue: true, Text: "b"},
 		{Type: "dialogue", Speaker: "Bingley", Gender: "male", IsDialogue: true, Text: "c"},
 	}
-	if changed := assignSegmentVoices(vm, chunk1); !changed {
+	if changed := assignSegmentVoices(vm, chunk1, &openaiEngine); !changed {
 		t.Fatal("first chunk must register new characters")
 	}
 	if chunk1[0].Voice == chunk1[2].Voice {
@@ -162,7 +162,7 @@ func TestAssignSegmentVoices_StableAcrossChunks(t *testing.T) {
 	chunk2 := []DialogueSegment{
 		{Type: "dialogue", Speaker: "darcy", Gender: "unknown", IsDialogue: true, Text: "d"},
 	}
-	if changed := assignSegmentVoices(vm, chunk2); changed {
+	if changed := assignSegmentVoices(vm, chunk2, &openaiEngine); changed {
 		t.Fatal("known character must not change the cast")
 	}
 	if chunk2[0].Voice != chunk1[0].Voice {
@@ -178,7 +178,7 @@ func TestAssignSegmentVoices_UnknownSpeakerNotNarrator(t *testing.T) {
 	segs := []DialogueSegment{
 		{Type: "dialogue", Speaker: "", Gender: "unknown", IsDialogue: true, Text: "who is there"},
 	}
-	assignSegmentVoices(vm, segs)
+	assignSegmentVoices(vm, segs, &openaiEngine)
 	if segs[0].Voice == VoiceNarrator || segs[0].Voice == "" {
 		t.Fatalf("unknown-speaker dialogue must not use the narrator voice, got %q", segs[0].Voice)
 	}
@@ -363,15 +363,43 @@ func TestPickVoice_NamedUnknownsGetDistinctVoices(t *testing.T) {
 		{IsDialogue: true, Speaker: "God", Gender: "unknown", Text: "Let there be light"},
 		{IsDialogue: true, Speaker: "Serpent", Gender: "unknown", Text: "Ye shall not surely die"},
 	}
-	assignSegmentVoices(vm, segs)
+	assignSegmentVoices(vm, segs, &openaiEngine)
 	if segs[0].Voice == segs[1].Voice {
 		t.Fatalf("God and Serpent must not share a voice: both %q", segs[0].Voice)
 	}
 	// unnamed speech still falls back to the shared unknown voice
 	anon := []DialogueSegment{{IsDialogue: true, Speaker: "", Gender: "unknown", Text: "hello"}}
-	assignSegmentVoices(vm, anon)
+	assignSegmentVoices(vm, anon, &openaiEngine)
 	if anon[0].Voice != unknownDialogueVoice {
 		t.Fatalf("unnamed speaker should use %q, got %q", unknownDialogueVoice, anon[0].Voice)
+	}
+}
+
+func TestEnginePools_KokoroCastDistinct(t *testing.T) {
+	vm := map[string]CharacterVoice{}
+	segs := []DialogueSegment{
+		{IsDialogue: true, Speaker: "Darcy", Gender: "male", Text: "a"},
+		{IsDialogue: true, Speaker: "Elizabeth", Gender: "female", Text: "b"},
+		{IsDialogue: true, Speaker: "God", Gender: "unknown", Text: "c"},
+	}
+	assignSegmentVoices(vm, segs, &kokoroEngine)
+	seen := map[string]bool{}
+	for _, s := range segs {
+		if seen[s.Voice] {
+			t.Fatalf("kokoro cast shares a voice: %+v", segs)
+		}
+		seen[s.Voice] = true
+		if s.Voice == kokoroEngine.NarratorVoice {
+			t.Fatalf("character got the narrator voice %q", s.Voice)
+		}
+	}
+	// narrator resolution respects the engine
+	n := getVoiceForSegment(DialogueSegment{Type: "narrator"}, &kokoroEngine)
+	if n != "bm_george" {
+		t.Fatalf("kokoro narrator: want bm_george, got %q", n)
+	}
+	if getVoiceForSegment(DialogueSegment{Type: "narrator"}, &openaiEngine) != VoiceNarrator {
+		t.Fatal("openai narrator regressed")
 	}
 }
 

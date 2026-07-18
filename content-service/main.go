@@ -57,7 +57,8 @@ type Book struct {
 	CoverURL    string // Optional cover image URL for public access
 	VoiceMap     string `gorm:"type:text"` // JSON character→{gender,voice} cast (voice continuity, audit H1)
 	ScorePalette string `gorm:"type:text"` // JSON []ScoreCue — per-book music palette (audit H2)
-	AudioProfile string `gorm:"type:text"` // JSON AudioProfile — fiction/genre/era (audit H3)
+	AudioProfile string `gorm:"type:text"`
+	TTSEngine    string `gorm:"size:32"` // voice engine pinned at creation ("openai"|"kokoro"; empty = openai) // JSON AudioProfile — fiction/genre/era (audit H3)
 	Index       int    // Index of the book in the list
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
@@ -419,6 +420,7 @@ func createBookHandler(c *gin.Context) {
 		Status:   "pending",
 		UserID:   userID,
 	}
+	book.TTSEngine = defaultTTSEngine()
 	if err := db.Create(&book).Error; err != nil {
 		log.Printf("Error creating book record: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save book", "details": err.Error()})

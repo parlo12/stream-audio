@@ -400,20 +400,20 @@ func segmentsCoverInput(input string, segs []DialogueSegment) bool {
 // segments normally carry a per-character voice assigned by the continuity
 // layer (segment.Voice); the gender pools' first entries are the legacy
 // fallback when no assignment happened (context-free path).
-func getVoiceForSegment(segment DialogueSegment) string {
+func getVoiceForSegment(segment DialogueSegment, cfg *ttsEngineConfig) string {
 	if !segment.IsDialogue || segment.Type == "narrator" {
-		return VoiceNarrator
+		return cfg.NarratorVoice
 	}
 	if segment.Voice != "" {
 		return segment.Voice
 	}
 	switch strings.ToLower(segment.Gender) {
 	case "male":
-		return VoiceMale
+		return cfg.MalePool[0]
 	case "female":
-		return VoiceFemale
+		return cfg.FemalePool[0]
 	default:
-		return unknownDialogueVoice // audit H1: unknown ≠ narrator's voice
+		return cfg.UnknownVoice // audit H1: unknown ≠ narrator's voice
 	}
 }
 
@@ -455,10 +455,10 @@ func getInstructionsForSegment(segment DialogueSegment) string {
 }
 
 // generateSegmentAudio generates audio for a single dialogue segment
-func generateSegmentAudio(segment DialogueSegment, bookID uint, segmentIndex int) (string, error) {
-	apiKey := os.Getenv("OPENAI_API_KEY")
+func generateSegmentAudio(segment DialogueSegment, bookID uint, segmentIndex int, cfg *ttsEngineConfig) (string, error) {
+	apiKey := cfg.APIKey()
 	if apiKey == "" {
-		return "", errors.New("OPENAI_API_KEY not set")
+		return "", errors.New(cfg.Name + " TTS API key not set")
 	}
 
 	text := cleanupForTTS(segment.Text)
@@ -466,14 +466,17 @@ func generateSegmentAudio(segment DialogueSegment, bookID uint, segmentIndex int
 		return "", nil // Skip empty segments
 	}
 
-	voice := getVoiceForSegment(segment)
-	instructions := getInstructionsForSegment(segment)
+	voice := getVoiceForSegment(segment, cfg)
+	instructions := ""
+	if cfg.SupportsInstructions {
+		instructions = getInstructionsForSegment(segment)
+	}
 
-	log.Printf("🎙️ Generating segment %d: voice=%s, type=%s, speaker=%s", segmentIndex, voice, segment.Type, segment.Speaker)
+	log.Printf("🎙️ Generating segment %d: engine=%s voice=%s, type=%s, speaker=%s", segmentIndex, cfg.Name, voice, segment.Type, segment.Speaker)
 
 	payload := TTSPayload{
 		Input:          text,
-		Model:          "gpt-4o-mini-tts",
+		Model:          cfg.Model,
 		Voice:          voice,
 		Instructions:   instructions,
 		ResponseFormat: "mp3",
@@ -481,7 +484,7 @@ func generateSegmentAudio(segment DialogueSegment, bookID uint, segmentIndex int
 	}
 	reqBody, _ := json.Marshal(payload)
 
-	req, err := http.NewRequest("POST", openaiTTSEndpoint, bytes.NewReader(reqBody))
+	req, err := http.NewRequest("POST", cfg.Endpoint, bytes.NewReader(reqBody))
 	if err != nil {
 		return "", fmt.Errorf("create TTS request: %w", err)
 	}
@@ -595,10 +598,12 @@ func convertTextToAudioMultiVoice(text string, audioID uint, bookID uint, prevTa
 	// the quote-based rules would read as narration; gate the relaxed rule on
 	// the book's audio profile so modern prose is untouched.
 	classical := false
+	cfg := &openaiEngine
 	if bookID != 0 {
 		var book Book
 		if err := db.First(&book, bookID).Error; err == nil {
 			classical = usesClassicalSpeech(getOrCreateAudioProfile(book), book)
+			cfg = engineFor(book) // bake-off July 18: engine pinned per book
 		}
 	}
 	if classical {
@@ -612,16 +617,16 @@ func convertTextToAudioMultiVoice(text string, audioID uint, bookID uint, prevTa
 	segments, err := analyzeDialogue(text, prevTail, vm, classical)
 	if err != nil {
 		log.Printf("⚠️ Dialogue analysis failed, falling back to single voice: %v", err)
-		return convertTextToAudioSingleVoice(text, audioID)
+		return convertTextToAudioSingleVoice(text, audioID, cfg)
 	}
 
 	if len(segments) == 0 {
 		log.Printf("⚠️ No segments found, falling back to single voice")
-		return convertTextToAudioSingleVoice(text, audioID)
+		return convertTextToAudioSingleVoice(text, audioID, cfg)
 	}
 
 	// Step 1b: stable per-character voices; persist newly met characters.
-	if changed := assignSegmentVoices(vm, segments); changed && bookID != 0 {
+	if changed := assignSegmentVoices(vm, segments, cfg); changed && bookID != 0 {
 		saveVoiceMap(bookID, vm)
 	}
 
@@ -634,7 +639,7 @@ func convertTextToAudioMultiVoice(text string, audioID uint, bookID uint, prevTa
 			continue
 		}
 
-		path, err := generateSegmentAudio(segment, audioID, i)
+		path, err := generateSegmentAudio(segment, audioID, i, cfg)
 		if err != nil {
 			log.Printf("⚠️ Failed to generate segment %d: %v", i, err)
 			continue
@@ -656,7 +661,7 @@ func convertTextToAudioMultiVoice(text string, audioID uint, bookID uint, prevTa
 
 	if len(segmentPaths) == 0 {
 		log.Printf("⚠️ No audio segments generated, falling back to single voice")
-		return convertTextToAudioSingleVoice(text, audioID)
+		return convertTextToAudioSingleVoice(text, audioID, cfg)
 	}
 
 	// Step 3: Merge all segments into final audio
@@ -691,7 +696,7 @@ func convertTextToAudioMultiVoice(text string, audioID uint, bookID uint, prevTa
 }
 
 // convertTextToAudioSingleVoice is the fallback single-voice TTS (original behavior)
-func convertTextToAudioSingleVoice(text string, bookID uint) (string, error) {
+func convertTextToAudioSingleVoice(text string, bookID uint, cfg *ttsEngineConfig) (string, error) {
 	// Prepare text for narration
 	narratorText, err := prepareNarratorText(text)
 	if err != nil {
@@ -699,29 +704,32 @@ func convertTextToAudioSingleVoice(text string, bookID uint) (string, error) {
 		narratorText = text
 	}
 
-	apiKey := os.Getenv("OPENAI_API_KEY")
+	apiKey := cfg.APIKey()
 	if apiKey == "" {
-		return "", errors.New("OPENAI_API_KEY not set")
+		return "", errors.New(cfg.Name + " TTS API key not set")
 	}
 
-	instructions := `You are an expressive audiobook narrator. Read with emotion and drama:
+	instructions := ""
+	if cfg.SupportsInstructions {
+		instructions = `You are an expressive audiobook narrator. Read with emotion and drama:
 - Pause naturally at sentence endings and paragraph breaks
 - Use varied pacing: slower for emotional moments, faster for action
 - Emphasize key words and phrases
 - Convey character emotions through tone
 - Add subtle pauses at ellipses (...)`
+	}
 
 	payload := TTSPayload{
 		Input:          narratorText,
-		Model:          "gpt-4o-mini-tts",
-		Voice:          VoiceNarrator,
+		Model:          cfg.Model,
+		Voice:          cfg.NarratorVoice,
 		Instructions:   instructions,
 		ResponseFormat: "mp3",
 		Speed:          1.0,
 	}
 	reqBody, _ := json.Marshal(payload)
 
-	req, err := http.NewRequest("POST", openaiTTSEndpoint, bytes.NewReader(reqBody))
+	req, err := http.NewRequest("POST", cfg.Endpoint, bytes.NewReader(reqBody))
 	if err != nil {
 		return "", fmt.Errorf("create TTS request: %w", err)
 	}

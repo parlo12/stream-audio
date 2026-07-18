@@ -75,15 +75,15 @@ func saveVoiceMap(bookID uint, vm map[string]CharacterVoice) {
 
 // pickVoice returns the next round-robin voice for a gender, based on how many
 // characters of that pool are already cast. Deterministic given the map.
-func pickVoice(vm map[string]CharacterVoice, gender string) string {
+func pickVoice(vm map[string]CharacterVoice, gender string, cfg *ttsEngineConfig) string {
 	var pool []string
 	switch strings.ToLower(gender) {
 	case "male":
-		pool = maleVoicePool
+		pool = cfg.MalePool
 	case "female":
-		pool = femaleVoicePool
+		pool = cfg.FemalePool
 	default:
-		pool = unknownVoicePool
+		pool = cfg.UnknownPool
 	}
 	inPool := map[string]bool{}
 	for _, v := range pool {
@@ -102,7 +102,7 @@ func pickVoice(vm map[string]CharacterVoice, gender string) string {
 // voice, updating the cast with newly met characters. Returns true if the cast
 // changed (caller persists). First-seen gender wins for a character — a later
 // contradictory guess must not flip an already-assigned voice.
-func assignSegmentVoices(vm map[string]CharacterVoice, segments []DialogueSegment) bool {
+func assignSegmentVoices(vm map[string]CharacterVoice, segments []DialogueSegment, cfg *ttsEngineConfig) bool {
 	changed := false
 	for i := range segments {
 		s := &segments[i]
@@ -111,14 +111,14 @@ func assignSegmentVoices(vm map[string]CharacterVoice, segments []DialogueSegmen
 		}
 		key := normalizeSpeaker(s.Speaker)
 		if key == "" || key == "unknown" {
-			s.Voice = unknownDialogueVoice
+			s.Voice = cfg.UnknownVoice
 			continue
 		}
 		cv, ok := vm[key]
 		if !ok {
 			cv = CharacterVoice{
 				Gender: strings.ToLower(strings.TrimSpace(s.Gender)),
-				Voice:  pickVoice(vm, s.Gender),
+				Voice:  pickVoice(vm, s.Gender, cfg),
 			}
 			vm[key] = cv
 			changed = true

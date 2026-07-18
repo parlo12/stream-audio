@@ -273,6 +273,7 @@ func importTextBook(c *gin.Context, userID uint, accountType, title, author stri
 		Status:   "parsing",
 		UserID:   userID,
 	}
+	book.TTSEngine = defaultTTSEngine()
 	if err := db.Create(&book).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not create book"})
 		return
