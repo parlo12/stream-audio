@@ -276,6 +276,41 @@ func TestCleanOCRText_PreservesRealNumbers(t *testing.T) {
 	}
 }
 
+func TestCleanOCRText_ScannedUploadArtifacts(t *testing.T) {
+	// A bad library scan (like the P&P upload): bookplate garbage, running
+	// headers repeated on every page, double-spaced OCR text.
+	in := "I  CM\n'CD\nO- =.,—\n" +
+		"AND PREJUDICE.\nThe  quick  brown  fox  jumped.\nAND PREJUDICE.\n" +
+		"She  said  hello  to  him.\nAND PREJUDICE.\nThey  walked  on.\nAND PREJUDICE.\n" +
+		"* * *\nThe end was near."
+	got := cleanOCRText(in)
+	for _, bad := range []string{"AND PREJUDICE.", "O- =.,—", "* * *", "  "} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("artifact %q survived:\n%s", bad, got)
+		}
+	}
+	for _, want := range []string{"quick brown fox", "said hello", "The end was near."} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("real prose %q lost:\n%s", want, got)
+		}
+	}
+}
+
+func TestIsOCRJunkLine(t *testing.T) {
+	junk := []string{"O- =.,—", "* * *", "|| :: //", "~~~^^^"}
+	for _, j := range junk {
+		if !isOCRJunkLine(j) {
+			t.Errorf("expected junk: %q", j)
+		}
+	}
+	real := []string{"I do.", "Chapter I", "Yes, sir.", "Mr. Darcy", "1851", ""}
+	for _, r := range real {
+		if isOCRJunkLine(r) {
+			t.Errorf("expected NOT junk: %q", r)
+		}
+	}
+}
+
 func TestParseAudioProfile_And_Hint(t *testing.T) {
 	p := parseAudioProfile(`{"fiction":false,"genre":"history","era":"historical"}`)
 	if p == nil || p.Fiction || p.Genre != "history" {

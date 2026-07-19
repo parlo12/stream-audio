@@ -30,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/gin-gonic/gin"
 )
@@ -393,6 +394,8 @@ var (
 	ocrPageNumRe = regexp.MustCompile(`(?m)^\s*[\[\(\-–— ]*\d{1,4}[\]\)\-–— ]*\s*$`)
 	// 3+ blank lines → one blank line.
 	ocrBlankRunRe = regexp.MustCompile(`\n{3,}`)
+	// Runs of horizontal whitespace → a single space (OCR double-spacing).
+	ocrMultiSpaceRe = regexp.MustCompile(`[ \t]{2,}`)
 )
 
 // cleanOCRText scrubs common scanner artifacts from Internet Archive _djvu.txt
@@ -404,21 +407,66 @@ func cleanOCRText(text string) string {
 	text = ocrHyphenRe.ReplaceAllString(text, "$1$2")
 	text = ocrPageNumRe.ReplaceAllString(text, "")
 
-	// Drop digitization/boilerplate lines.
 	lines := strings.Split(text, "\n")
+
+	// Running-header/footer pass: a short line repeated verbatim many times
+	// across the document is almost always a page header/footer ("AND
+	// PREJUDICE.", "THE COMPLETE WORKS") — real prose lines don't recur.
+	freq := map[string]int{}
+	for _, line := range lines {
+		if t := strings.TrimSpace(line); len(t) > 0 && len(t) <= 40 {
+			freq[t]++
+		}
+	}
+
 	kept := lines[:0]
 	for _, line := range lines {
-		l := strings.ToLower(strings.TrimSpace(line))
+		t := strings.TrimSpace(line)
+		l := strings.ToLower(t)
+		// digitization/boilerplate
 		if strings.Contains(l, "digitized by") ||
 			strings.Contains(l, "downloaded from") ||
 			strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://") ||
 			strings.Contains(l, "archive.org") {
 			continue
 		}
+		// repeated running header/footer
+		if len(t) > 0 && len(t) <= 40 && freq[t] >= 4 {
+			continue
+		}
+		// scanner-garbage line: has real content chars but is mostly symbols
+		// ("O- =.,—", "* * *", "|| :"). Keeps any line ≥35% letters, so real
+		// short lines ("I do.", "Chapter I") survive.
+		if isOCRJunkLine(t) {
+			continue
+		}
 		kept = append(kept, line)
 	}
 	text = strings.Join(kept, "\n")
 
+	text = ocrMultiSpaceRe.ReplaceAllString(text, " ")
 	text = ocrBlankRunRe.ReplaceAllString(text, "\n\n")
 	return strings.TrimSpace(text)
+}
+
+// isOCRJunkLine reports whether a line is scanner noise: it has at least a few
+// non-space characters but alphanumerics make up under 35% of them (the rest
+// being punctuation/symbols like "O- =.,—" or "* * *"). Digits count as
+// content so years and figures survive; short and alphanumeric-rich lines are
+// never junk, so ordinary prose is untouched.
+func isOCRJunkLine(t string) bool {
+	nonSpace, content := 0, 0
+	for _, r := range t {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		nonSpace++
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			content++
+		}
+	}
+	if nonSpace < 3 {
+		return false // too short to judge; leave it
+	}
+	return float64(content)/float64(nonSpace) < 0.35
 }

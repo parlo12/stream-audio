@@ -272,20 +272,33 @@ func ExtractTextByType(path string) (string, error) {
 		path = local
 	}
 	lowerPath := strings.ToLower(path)
+	var (
+		text string
+		err  error
+	)
 	switch {
 	case strings.HasSuffix(lowerPath, ".pdf"):
-		return ExtractTextFromPDF(path)
+		text, err = ExtractTextFromPDF(path)
 	case strings.HasSuffix(lowerPath, ".txt"):
-		return ExtractTextFromTXT(path)
+		text, err = ExtractTextFromTXT(path)
 	case strings.HasSuffix(lowerPath, ".epub"):
-		return ExtractTextFromEPUB(path)
+		text, err = ExtractTextFromEPUB(path)
 	case strings.HasSuffix(lowerPath, ".azw") || strings.HasSuffix(lowerPath, ".mobi") || strings.HasSuffix(lowerPath, ".azw3"):
-		return ExtractTextFromMOBI(path)
+		text, err = ExtractTextFromMOBI(path)
 	case strings.HasSuffix(lowerPath, ".kfx"):
 		return "", errors.New("KFX format is not supported. Please convert to EPUB, PDF, MOBI, or AZW3 format first")
 	default:
 		return "", errors.New("unsupported file type. Supported formats: PDF, TXT, EPUB, MOBI, AZW, AZW3")
 	}
+	if err != nil {
+		return "", err
+	}
+	// Scrub OCR/scanner artifacts on EVERY uploaded document — scanned PDFs
+	// and library-scan .txt/EPUBs carry page numbers, hyphen-wrapped words,
+	// running headers, and digitization boilerplate that TTS would read
+	// aloud (audit H4, previously applied only to Internet Archive imports).
+	// Deterministic and conservative; a no-op on already-clean text.
+	return cleanOCRText(text), nil
 }
 
 // Add ExtractTextFromPDF, ExtractTextFromTXT, ExtractTextFromEPUB...
