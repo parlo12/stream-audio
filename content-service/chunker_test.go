@@ -76,3 +76,30 @@ func TestWordSafeChunks_ShortInput(t *testing.T) {
 		t.Fatal("empty input must be nil")
 	}
 }
+
+func TestContentHash_DeterministicAndDistinct(t *testing.T) {
+	a := contentHash("It is a truth universally acknowledged.")
+	b := contentHash("It is a truth universally acknowledged.")
+	c := contentHash("It is a truth universally acknowledged!")
+	if a != b {
+		t.Fatal("identical text must hash identically (cross-book dedup key)")
+	}
+	if a == c {
+		t.Fatal("different text must hash differently")
+	}
+	if len(a) != 64 {
+		t.Fatalf("expected 64-hex sha256, got %d chars", len(a))
+	}
+}
+
+func TestSharedAudioKey_SeparatesEngines(t *testing.T) {
+	h := contentHash("hello")
+	k1 := sharedAudioKey("kokoro", h, ".mp3")
+	k2 := sharedAudioKey("openai", h, ".mp3")
+	if k1 == k2 {
+		t.Fatal("same text on different engines must map to different keys")
+	}
+	if k1 != "shared/audio/kokoro/"+h+".mp3" {
+		t.Fatalf("unexpected key format: %s", k1)
+	}
+}

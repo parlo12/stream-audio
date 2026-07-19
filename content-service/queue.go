@@ -232,6 +232,14 @@ func transcribePage(book Book, chunk BookChunk, userID uint, accountType string)
 
 	fail := func() { db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "failed") }
 
+	// Cross-user dedup: if this exact text+engine was already rendered for any
+	// book, reuse the shared audio and skip the whole pipeline (no TTS, brain,
+	// classifiers, foley, or music cost). Quota is still consumed above — it's
+	// the user's page, it just costs us nothing.
+	if reuseRenderedPageForChunk(book, chunk) {
+		return nil
+	}
+
 	audioPath, err := convertTextToAudioForChunk(chunk)
 	if err != nil {
 		fail()
@@ -254,12 +262,16 @@ func transcribePage(book Book, chunk BookChunk, userID uint, accountType string)
 	// treatment as on-demand pages. Library-cached clips make this ~one
 	// gpt-4o-mini call per fiction page; nonfiction skips inside.
 	mergedAudio = applyFoleyOverlay(mergedAudio, audioPath, book, chunk)
-	key, err := uploadArtifact(context.Background(), mergedAudio,
-		audioPageKey(book.ID, chunk.Index, hash, filepath.Ext(mergedAudio)))
-	if err != nil {
+	// Store the mixed audio at a content-addressed SHARED key so the next book
+	// with identical text+engine reuses it (see page_dedup.go). Register it
+	// after upload so later renders short-circuit.
+	engine := engineName(book)
+	key := sharedAudioKey(engine, hash, filepath.Ext(mergedAudio))
+	if _, err := uploadArtifact(context.Background(), mergedAudio, key); err != nil {
 		fail()
 		return err
 	}
+	registerRenderedPage(hash, engine, key, loadVoiceMapJSON(book.ID))
 	db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Updates(map[string]interface{}{
 		"audio_path":       key,
 		"final_audio_path": key,

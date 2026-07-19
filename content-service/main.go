@@ -373,7 +373,7 @@ func setupDatabase() {
 	// Only the API owns schema migrations. Workers skip AutoMigrate so a
 	// co-deploy doesn't race two concurrent CREATE TABLEs (Postgres DDL race).
 	if getEnv("RUN_MODE", "both") != "worker" {
-		if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}, &PlaybackProgress{}, &TranscriptionBatch{}, &PlanLimit{}, &UsageEvent{}, &DeviceToken{}, &BugReport{}, &AppConfig{}, &CastEvent{}, &Follow{}); err != nil {
+		if err := db.AutoMigrate(&Book{}, &BookChunk{}, &ProcessedChunkGroup{}, &TTSQueueJob{}, &PlaybackProgress{}, &TranscriptionBatch{}, &PlanLimit{}, &UsageEvent{}, &DeviceToken{}, &BugReport{}, &AppConfig{}, &CastEvent{}, &Follow{}, &RenderedPage{}); err != nil {
 			log.Fatalf("AutoMigrate failed: %v", err)
 		}
 		seedPlanLimits()
