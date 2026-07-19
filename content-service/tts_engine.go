@@ -9,8 +9,9 @@ package main
 // Model: books.tts_engine pins the engine for a book's whole lifetime —
 // existing books stay on the engine that voiced them (voice continuity;
 // switching would also demand a full re-render + HLS invalidation). New
-// books get DEFAULT_TTS_ENGINE. The same seam is where the premium
-// "Cinematic+ voices" toggle will plug in an ElevenLabs engine later.
+// books get DEFAULT_TTS_ENGINE. The registry is open for additional engines,
+// but there is no user-facing engine switch — the default is chosen at the
+// platform level, not per user.
 //
 // Kokoro is served through DeepInfra's OpenAI-compatible /audio/speech
 // endpoint, so both engines share one request shape; only endpoint, key,
