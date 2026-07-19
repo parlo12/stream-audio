@@ -284,6 +284,13 @@ func deleteStored(path string) {
 	if path == "" {
 		return
 	}
+	// Content-addressed shared renderings (shared/…) are reused across books
+	// via rendered_pages and MUST outlive any single book — a book's chunks
+	// point AT the shared object, so a per-key delete here would break every
+	// other book that reuses it. Only a ref-counted GC may remove these.
+	if strings.HasPrefix(path, "shared/") {
+		return
+	}
 	if isLegacyLocalPath(path) {
 		removeFileIfExists(path)
 		return
