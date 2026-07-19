@@ -18,6 +18,7 @@ package main
 // ref-counted GC can come later).
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -118,6 +119,15 @@ func reuseRenderedPageForChunk(book Book, chunk BookChunk) bool {
 	engine := engineName(book)
 	rp, ok := lookupRenderedPage(hash, engine)
 	if !ok {
+		return false
+	}
+	// Self-heal: the shared object may be missing (deleted before the
+	// no-delete guard existed, or a future GC). Verify it's really there
+	// before pointing a chunk at it; if gone, drop the stale row and fall
+	// through to a fresh render that re-creates and re-registers it.
+	if exists, err := store.Exists(context.Background(), rp.AudioKey); err != nil || !exists {
+		db.Where("content_hash = ? AND engine = ?", hash, engine).Delete(&RenderedPage{})
+		log.Printf("🩹 [Dedup] stale shared %s (%s) missing — re-rendering", engine, hash[:8])
 		return false
 	}
 	adoptSharedCast(book.ID, rp.VoiceMap)
