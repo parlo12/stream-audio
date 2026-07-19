@@ -278,21 +278,39 @@ func TestCleanOCRText_PreservesRealNumbers(t *testing.T) {
 
 func TestCleanOCRText_ScannedUploadArtifacts(t *testing.T) {
 	// A bad library scan (like the P&P upload): bookplate garbage, running
-	// headers repeated on every page, double-spaced OCR text.
+	// headers with OCR-garbled page numbers attached (so no two are equal),
+	// double-spaced OCR text — plus real chapter headings that MUST survive.
 	in := "I  CM\n'CD\nO- =.,—\n" +
-		"AND PREJUDICE.\nThe  quick  brown  fox  jumped.\nAND PREJUDICE.\n" +
-		"She  said  hello  to  him.\nAND PREJUDICE.\nThey  walked  on.\nAND PREJUDICE.\n" +
-		"* * *\nThe end was near."
+		"CHAPTER I.\n2 PRIDE AND PREJUDICE.\nThe  quick  brown  fox  jumped.\n" +
+		"PRIDE AND PREJUDICE. 3\nShe  said  hello  to  him.\n4< PRIDE AND PREJUDICE.\n" +
+		"They  walked  on.\nPRIDE AND PREJUDICE*\nThe end was near."
 	got := cleanOCRText(in)
-	for _, bad := range []string{"AND PREJUDICE.", "O- =.,—", "* * *", "  "} {
+	for _, bad := range []string{"PRIDE AND PREJUDICE", "O- =.,—", "  "} {
 		if strings.Contains(got, bad) {
 			t.Fatalf("artifact %q survived:\n%s", bad, got)
 		}
 	}
-	for _, want := range []string{"quick brown fox", "said hello", "The end was near."} {
+	for _, want := range []string{"quick brown fox", "said hello", "The end was near.", "CHAPTER I."} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("real prose %q lost:\n%s", want, got)
+			t.Fatalf("real content %q lost:\n%s", want, got)
 		}
+	}
+}
+
+func TestHeaderCore_NormalizesAndBounds(t *testing.T) {
+	// page-number/punctuation variants collapse to one core
+	for _, v := range []string{"2 PRIDE AND PREJUDICE.", "PRIDE AND PREJUDICE. 3", "4< PRIDE AND PREJUDICE*"} {
+		if headerCore(v) != "PRIDE AND PREJUDICE" {
+			t.Fatalf("%q → %q, want PRIDE AND PREJUDICE", v, headerCore(v))
+		}
+	}
+	// short dialogue and long prose are never header-eligible
+	if headerCore("Yes.") != "" || headerCore("No, sir.") != "" {
+		t.Fatal("short lines must not be header cores")
+	}
+	long := "It is a truth universally acknowledged that a single man in want"
+	if headerCore(long) != "" {
+		t.Fatal("long prose lines must not be header cores")
 	}
 }
 

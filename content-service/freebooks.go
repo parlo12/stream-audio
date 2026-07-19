@@ -406,16 +406,23 @@ var (
 func cleanOCRText(text string) string {
 	text = ocrHyphenRe.ReplaceAllString(text, "$1$2")
 	text = ocrPageNumRe.ReplaceAllString(text, "")
+	// Normalize OCR double-spacing BEFORE the line passes so running headers
+	// like "AND  PREJUDICE." collapse to one canonical form and dedupe.
+	text = ocrMultiSpaceRe.ReplaceAllString(text, " ")
 
 	lines := strings.Split(text, "\n")
 
-	// Running-header/footer pass: a short line repeated verbatim many times
-	// across the document is almost always a page header/footer ("AND
-	// PREJUDICE.", "THE COMPLETE WORKS") — real prose lines don't recur.
+	// Running-header/footer pass: scanned books repeat the title on every page
+	// ("PRIDE AND PREJUDICE."), but OCR attaches a page number and garbles it
+	// ("2 PRIDE AND PREJUDICE.", "PRIDE AND PREJUDICE. 3", "4< PRIDE AND
+	// PREJUDICE*"), so no two are verbatim-equal. Key the frequency count on
+	// the letters-only CORE (surrounding digits/punctuation stripped); a core
+	// of 8+ chars recurring 4+ times as a short standalone line is a header.
+	// The 8-char floor protects short repeated dialogue ("Yes.", "No.").
 	freq := map[string]int{}
 	for _, line := range lines {
-		if t := strings.TrimSpace(line); len(t) > 0 && len(t) <= 40 {
-			freq[t]++
+		if c := headerCore(line); c != "" {
+			freq[c]++
 		}
 	}
 
@@ -430,8 +437,8 @@ func cleanOCRText(text string) string {
 			strings.Contains(l, "archive.org") {
 			continue
 		}
-		// repeated running header/footer
-		if len(t) > 0 && len(t) <= 40 && freq[t] >= 4 {
+		// repeated running header/footer (core match, tolerates page numbers)
+		if c := headerCore(line); c != "" && freq[c] >= 4 {
 			continue
 		}
 		// scanner-garbage line: has real content chars but is mostly symbols
@@ -444,9 +451,29 @@ func cleanOCRText(text string) string {
 	}
 	text = strings.Join(kept, "\n")
 
-	text = ocrMultiSpaceRe.ReplaceAllString(text, " ")
 	text = ocrBlankRunRe.ReplaceAllString(text, "\n\n")
 	return strings.TrimSpace(text)
+}
+
+// headerCore returns the running-header signature of a line: its letters-only
+// core with surrounding digits/punctuation stripped, so "2 PRIDE AND
+// PREJUDICE.", "PRIDE AND PREJUDICE. 3", and "4< PRIDE AND PREJUDICE*" all map
+// to "PRIDE AND PREJUDICE". Returns "" for lines that can't be headers: those
+// longer than 45 runes (real prose paragraphs) or whose core is under 8 chars
+// (short repeated dialogue like "Yes." must survive). Internal whitespace is
+// collapsed so spacing variants match.
+func headerCore(line string) string {
+	t := strings.TrimSpace(line)
+	if t == "" || len([]rune(t)) > 45 {
+		return ""
+	}
+	// Strip leading/trailing runes that aren't letters (page numbers, marks).
+	core := strings.TrimFunc(t, func(r rune) bool { return !unicode.IsLetter(r) })
+	core = strings.ToUpper(strings.Join(strings.Fields(core), " "))
+	if len(core) < 8 {
+		return ""
+	}
+	return core
 }
 
 // isOCRJunkLine reports whether a line is scanner noise: it has at least a few
