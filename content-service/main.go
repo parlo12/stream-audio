@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -482,6 +483,18 @@ func deleteBookHandler(c *gin.Context) {
 	deleteStored(book.AudioPath)
 	deleteStored(book.CoverPath)
 	_ = os.RemoveAll(uploadDirForBook(book.UserID, book.ID))
+
+	// Sweep the whole R2 media tree for this book: final page audio, score
+	// cues, and — critically — the HLS playlists + segment files, whose names
+	// aren't tracked per-row and so can't be deleted key-by-key above. Best
+	// effort; the per-key deletes already handled the tracked objects.
+	if store != nil {
+		if n, err := store.DeletePrefix(context.Background(), fmt.Sprintf("audio/%d/", book.ID)); err != nil {
+			log.Printf("⚠️ HLS/media prefix cleanup for book %d failed: %v", book.ID, err)
+		} else if n > 0 {
+			log.Printf("🧹 Removed %d media objects under audio/%d/", n, book.ID)
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Book deleted successfully"})
 }

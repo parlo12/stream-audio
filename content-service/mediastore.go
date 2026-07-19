@@ -56,6 +56,10 @@ type MediaStore interface {
 	PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error)
 	PresignPut(ctx context.Context, key string, ttl time.Duration, contentType string) (string, error)
 	Delete(ctx context.Context, key string) error
+	// DeletePrefix removes every object under a key prefix. Used to fully
+	// clean a book's media tree on delete — final audio, HLS playlists, and
+	// the HLS segment files whose names aren't tracked in the DB.
+	DeletePrefix(ctx context.Context, prefix string) (int, error)
 	Exists(ctx context.Context, key string) (bool, error)
 	PublicURL(key string) string
 }
@@ -163,6 +167,41 @@ func (s *r2Store) PresignPut(ctx context.Context, key string, ttl time.Duration,
 func (s *r2Store) Delete(ctx context.Context, key string) error {
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)})
 	return err
+}
+
+// DeletePrefix lists and deletes every object under prefix, paginating the
+// list and batching deletes (S3 caps DeleteObjects at 1000 keys/call).
+// Returns the number of objects removed.
+func (s *r2Store) DeletePrefix(ctx context.Context, prefix string) (int, error) {
+	if strings.TrimSpace(prefix) == "" {
+		return 0, errors.New("DeletePrefix: empty prefix")
+	}
+	deleted := 0
+	p := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(s.bucket), Prefix: aws.String(prefix),
+	})
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return deleted, err
+		}
+		if len(page.Contents) == 0 {
+			continue
+		}
+		ids := make([]types.ObjectIdentifier, 0, len(page.Contents))
+		for _, obj := range page.Contents {
+			ids = append(ids, types.ObjectIdentifier{Key: obj.Key})
+		}
+		out, err := s.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+			Bucket: aws.String(s.bucket),
+			Delete: &types.Delete{Objects: ids, Quiet: aws.Bool(true)},
+		})
+		if err != nil {
+			return deleted, err
+		}
+		deleted += len(ids) - len(out.Errors)
+	}
+	return deleted, nil
 }
 
 func (s *r2Store) Exists(ctx context.Context, key string) (bool, error) {
