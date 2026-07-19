@@ -13,9 +13,58 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"rsc.io/pdf"
 )
+
+// wordSafeChunks splits runes into [start,end) spans of about chunkSize each,
+// but never mid-word: each cut is pulled back to the nearest whitespace within
+// a lookback window, and the whitespace run at the boundary is dropped so the
+// next chunk starts on a clean word. This fixes page breaks that split words
+// ("though" → "thoug" | "h") and made TTS mispronounce the last/first word of
+// every page. A pathological run with no whitespace in the window (rare — a
+// URL or OCR blob) falls back to a hard cut so chunking always progresses.
+func wordSafeChunks(runes []rune, chunkSize int) [][2]int {
+	total := len(runes)
+	if total == 0 {
+		return nil
+	}
+	const maxLookback = 200 // up to 20% of a 1000-rune page
+	var spans [][2]int
+	i := 0
+	for i < total {
+		if i+chunkSize >= total {
+			spans = append(spans, [2]int{i, total})
+			break
+		}
+		target := i + chunkSize
+		cut := -1
+		lo := target - maxLookback
+		if lo < i+1 {
+			lo = i + 1
+		}
+		for k := target; k >= lo; k-- {
+			if unicode.IsSpace(runes[k]) {
+				cut = k
+				break
+			}
+		}
+		if cut < 0 {
+			cut = target // no boundary in window: hard cut, guarantee progress
+		}
+		spans = append(spans, [2]int{i, cut})
+		j := cut
+		for j < total && unicode.IsSpace(runes[j]) {
+			j++
+		}
+		if j <= i {
+			j = cut + 1 // never stall
+		}
+		i = j
+	}
+	return spans
+}
 
 // calibreTimeout bounds ebook-convert so a runaway conversion on a huge/complex
 // file is killed rather than orphaned past the asynq parse timeout (15m).
@@ -76,16 +125,11 @@ func ChunkDocument(bookID uint, filePath string) (int, error) {
 	batchSize := 100
 	count := 0
 
-	for i := 0; i < total; i += chunkSize {
-		end := i + chunkSize
-		if end > total {
-			end = total
-		}
-
+	for _, span := range wordSafeChunks(runes, chunkSize) {
 		chunk := BookChunk{
 			BookID:    bookID,
 			Index:     count,
-			Content:   string(runes[i:end]),
+			Content:   string(runes[span[0]:span[1]]),
 			AudioPath: "",
 			TTSStatus: "pending",
 		}
@@ -178,22 +222,16 @@ func ChunkDocumentBatch(bookID uint, filePath string) (int, error) {
 
 	runes := []rune(text)
 	chunkSize := 1000
-	total := len(runes)
 	batchSize := 500 // Insert 500 chunks at a time
 
 	var chunks []BookChunk
 	count := 0
 
-	for i := 0; i < total; i += chunkSize {
-		end := i + chunkSize
-		if end > total {
-			end = total
-		}
-
+	for _, span := range wordSafeChunks(runes, chunkSize) {
 		chunks = append(chunks, BookChunk{
 			BookID:    bookID,
 			Index:     count,
-			Content:   string(runes[i:end]),
+			Content:   string(runes[span[0]:span[1]]),
 			AudioPath: "",
 			TTSStatus: "pending",
 		})
