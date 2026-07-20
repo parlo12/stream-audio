@@ -150,6 +150,9 @@ func startAsyncWorker() error {
 	// client died before confirming (R2 has no bucket-event webhooks).
 	go reconcileUploadsLoop()
 
+	// Daily GC of orphaned shared page-audio (dedup renderings no book uses).
+	go sharedAudioGCLoop()
+
 	log.Printf("🛠️  asynq worker starting (concurrency=%d)", concurrency)
 	return srv.Run(mux)
 }

@@ -324,6 +324,7 @@ func main() {
 		admin.GET("/files/tree", getFileTreeContentHandler)
 		admin.GET("/bug-reports", ListBugReportsHandler)
 		admin.POST("/gutenberg/refresh", RefreshGutenbergHandler)
+		admin.POST("/gc/shared-audio", gcSharedAudioHandler)
 	}
 
 	for _, r := range router.Routes() {

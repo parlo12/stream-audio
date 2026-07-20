@@ -23,7 +23,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 // RenderedPage maps a page's (text, engine) to its shared audio object.
@@ -107,6 +110,73 @@ func adoptSharedCast(bookID uint, sharedVoiceMap string) {
 	}
 	if changed {
 		saveVoiceMap(bookID, vm)
+	}
+}
+
+// gcOrphanedSharedRenderings removes shared renderings no book references
+// anymore (every book that used them was deleted). A rendering is orphaned
+// when zero book_chunks point final_audio_path at its shared key. Only
+// entries older than graceMinutes are considered, so a rendering that's
+// momentarily between "registered" and "referenced" isn't reaped. Deletes at
+// most `limit` per run. The reuse path HEAD-checks the object (self-heal), so
+// a rare race where a reuse attaches just as GC deletes resolves to a
+// re-render, never a permanent 404. GC is the ONLY authorized deleter of
+// shared/ objects — it calls store.Delete directly (deleteStored no-ops them).
+func gcOrphanedSharedRenderings(graceMinutes, limit int) (int, error) {
+	cutoff := time.Now().Add(-time.Duration(graceMinutes) * time.Minute)
+	var candidates []RenderedPage
+	if err := db.Where("created_at < ?", cutoff).Limit(limit).Find(&candidates).Error; err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, rp := range candidates {
+		var refs int64
+		if err := db.Model(&BookChunk{}).
+			Where("final_audio_path = ?", rp.AudioKey).Count(&refs).Error; err != nil {
+			continue
+		}
+		if refs > 0 {
+			continue // still in use
+		}
+		// Drop the row first so no new reuse can attach to it, then delete the
+		// object. store.Delete (not deleteStored) — GC is the shared deleter.
+		if err := db.Delete(&RenderedPage{}, rp.ID).Error; err != nil {
+			continue
+		}
+		if err := store.Delete(context.Background(), rp.AudioKey); err != nil {
+			log.Printf("⚠️ [GC] could not delete shared object %s: %v", rp.AudioKey, err)
+			continue
+		}
+		removed++
+	}
+	if removed > 0 {
+		log.Printf("🧹 [GC] removed %d orphaned shared rendering(s)", removed)
+	}
+	return removed, nil
+}
+
+// gcSharedAudioHandler (admin) runs the orphan sweep on demand. Optional
+// ?grace_minutes= override (default 60); returns how many were removed.
+func gcSharedAudioHandler(c *gin.Context) {
+	grace := envIntQuery(c, "grace_minutes", 60, 1_000_000)
+	removed, err := gcOrphanedSharedRenderings(grace, 5000)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"removed": removed})
+}
+
+// sharedAudioGCLoop runs the orphan sweep once a day in the worker.
+func sharedAudioGCLoop() {
+	interval := time.Duration(envInt("SHARED_GC_INTERVAL_MINUTES", 1440)) * time.Minute
+	grace := envInt("SHARED_GC_GRACE_MINUTES", 60)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		if _, err := gcOrphanedSharedRenderings(grace, 1000); err != nil {
+			log.Printf("⚠️ [GC] sweep failed: %v", err)
+		}
 	}
 }
 
