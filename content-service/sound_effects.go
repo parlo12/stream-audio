@@ -1384,13 +1384,17 @@ func processSoundEffectsAndMerge(book Book, hash string, pageIndexes []int) {
 		mixedPath = applyFoleyOverlay(mixedPath, ttsLocal, book, chunk)
 		cleanupTTS() // TTS input no longer needed
 
-		// Upload the finished page audio to R2 and store its object key.
-		key, uerr := uploadArtifact(context.Background(), mixedPath,
-			audioPageKey(book.ID, idx, hash, filepath.Ext(mixedPath)))
-		if uerr != nil {
+		// Upload the finished page audio to a content-addressed SHARED key so
+		// the next book with identical text+engine reuses it (page_dedup.go),
+		// then register it. Matches the batch path (transcribePage).
+		pageHash := contentHash(chunk.Content)
+		engine := engineName(book)
+		key := sharedAudioKey(engine, pageHash, filepath.Ext(mixedPath))
+		if _, uerr := uploadArtifact(context.Background(), mixedPath, key); uerr != nil {
 			log.Printf("❌ R2 upload failed for book_id=%d page=%d: %v", book.ID, idx, uerr)
 			continue
 		}
+		registerRenderedPage(pageHash, engine, key, loadVoiceMapJSON(book.ID))
 		if err := db.Model(&BookChunk{}).
 			Where("book_id = ? AND \"index\" = ?", book.ID, idx).
 			Updates(map[string]interface{}{

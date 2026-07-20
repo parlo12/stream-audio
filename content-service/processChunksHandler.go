@@ -72,7 +72,19 @@ func ProcessChunksTTSHandler(c *gin.Context) {
 			continue
 		}
 		pageIndex := chunk.Index + 1 // Convert to 1-based index for user-friendly messages
+		book := Book{}
+		if err := db.First(&book, chunk.BookID).Error; err != nil {
+			log.Printf("failed to find book %d: %v", chunk.BookID, err)
+			continue
+		}
 		db.Model(&chunk).Update("TTSStatus", "processing")
+
+		// Cross-user dedup: if this exact text+engine was already rendered for
+		// any book, reuse the shared audio and skip TTS + the whole merge.
+		if reuseRenderedPageForChunk(book, chunk) {
+			continue
+		}
+
 		audioPath, err := convertTextToAudioForChunk(chunk)
 		if err != nil {
 			db.Model(&chunk).Update("TTSStatus", "failed")
@@ -83,16 +95,9 @@ func ProcessChunksTTSHandler(c *gin.Context) {
 		db.Save(&chunk)
 		audioPaths = append(audioPaths, audioPath)
 
-		// ✅ NEW: trigger the per-page final merge
-		book := Book{}
-		if err := db.First(&book, chunk.BookID).Error; err != nil {
-			log.Printf("failed to find book %d: %v", chunk.BookID, err)
-			continue
-		} else {
-			// Launch sound effects and merging in the background
-			log.Printf("🚀 Launching effects merge for book ID %d, chunk index %d", book.ID, pageIndex)
-			go processSoundEffectsAndMerge(book, book.ContentHash, []int{chunk.Index})
-		}
+		// Trigger the per-page final merge (music + foley + mix).
+		log.Printf("🚀 Launching effects merge for book ID %d, chunk index %d", book.ID, pageIndex)
+		go processSoundEffectsAndMerge(book, book.ContentHash, []int{chunk.Index})
 	}
 
 	// Attempt to merge (optional). Q7: check the error we actually returned.

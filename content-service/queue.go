@@ -559,6 +559,10 @@ func lookAheadTranscribeChunk(book Book, chunk BookChunk, userID uint, accountTy
 		db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "pending")
 		return errQuotaExceeded
 	}
+	// Cross-user dedup: reuse a shared rendering if this text+engine exists.
+	if reuseRenderedPageForChunk(book, chunk) {
+		return nil
+	}
 	audioPath, err := convertTextToAudioForChunk(chunk)
 	if err != nil {
 		db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "failed")
