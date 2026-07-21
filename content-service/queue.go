@@ -268,7 +268,7 @@ func transcribePage(book Book, chunk BookChunk, userID uint, accountType string)
 	// Store the mixed audio at a content-addressed SHARED key so the next book
 	// with identical text+engine reuses it (see page_dedup.go). Register it
 	// after upload so later renders short-circuit.
-	engine := engineName(book)
+	engine := dedupEngineKey(book)
 	key := sharedAudioKey(engine, hash, filepath.Ext(mergedAudio))
 	if _, err := uploadArtifact(context.Background(), mergedAudio, key); err != nil {
 		fail()

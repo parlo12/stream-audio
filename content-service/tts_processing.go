@@ -130,6 +130,36 @@ Simply return the enhanced plain text ready to be read aloud.`
 	return text, nil
 }
 
+// titleAbbrev maps common English honorific/title abbreviations to their
+// spoken form. Kokoro (via its phonemizer) treats the period in "Mr." as a
+// sentence boundary and inserts a ~0.5s pause before the next word — verified:
+// "Mr. Bennet" runs 4.15s with a 0.52s dead gap vs 2.73s / 0.28s for
+// "Mister Bennet". Expanding removes the period AND guarantees pronunciation.
+var titleAbbrev = map[string]string{
+	"Mr": "Mister", "Mrs": "Missus", "Ms": "Miss", "Mx": "Mix",
+	"Dr": "Doctor", "Prof": "Professor", "Rev": "Reverend", "Fr": "Father",
+	"Capt": "Captain", "Col": "Colonel", "Gen": "General", "Lt": "Lieutenant",
+	"Sgt": "Sergeant", "Maj": "Major", "Gov": "Governor", "Sen": "Senator",
+	"Hon": "Honorable", "Messrs": "Messieurs", "Jr": "Junior", "Sr": "Senior",
+	"St": "Saint", "Mt": "Mount",
+}
+
+// titleAbbrevRe matches a known title (capitalized, as in prose) followed by a
+// period. Case-sensitive so lowercase "st." in mid-word contexts is left alone.
+var titleAbbrevRe = regexp.MustCompile(`\b(Mr|Mrs|Ms|Mx|Dr|Prof|Rev|Fr|Capt|Col|Gen|Lt|Sgt|Maj|Gov|Sen|Hon|Messrs|Jr|Sr|St|Mt)\.`)
+
+// expandTitleAbbreviations rewrites "Mr. Bennet" → "Mister Bennet" so Kokoro
+// doesn't pause on the abbreviation period. Applied only for engines whose
+// phonemizer mishandles these (ExpandTitles); OpenAI voices this natively.
+func expandTitleAbbreviations(text string) string {
+	return titleAbbrevRe.ReplaceAllStringFunc(text, func(m string) string {
+		if full, ok := titleAbbrev[strings.TrimSuffix(m, ".")]; ok {
+			return full
+		}
+		return m
+	})
+}
+
 // cleanupForTTS removes any XML/SSML tags and code block markers from text
 func cleanupForTTS(text string) string {
 	// Remove code block markers
@@ -465,6 +495,9 @@ func generateSegmentAudio(segment DialogueSegment, bookID uint, segmentIndex int
 	if strings.TrimSpace(text) == "" {
 		return "", nil // Skip empty segments
 	}
+	if cfg.ExpandTitles {
+		text = expandTitleAbbreviations(text)
+	}
 
 	voice := getVoiceForSegment(segment, cfg)
 	instructions := ""
@@ -702,6 +735,9 @@ func convertTextToAudioSingleVoice(text string, bookID uint, cfg *ttsEngineConfi
 	if err != nil {
 		log.Printf("⚠️ Text preparation failed, using original: %v", err)
 		narratorText = text
+	}
+	if cfg.ExpandTitles {
+		narratorText = expandTitleAbbreviations(narratorText)
 	}
 
 	apiKey := cfg.APIKey()

@@ -103,3 +103,22 @@ func TestSharedAudioKey_SeparatesEngines(t *testing.T) {
 		t.Fatalf("unexpected key format: %s", k1)
 	}
 }
+
+func TestExpandTitleAbbreviations(t *testing.T) {
+	cases := map[string]string{
+		"My dear Mr. Bennet, have you heard?":     "My dear Mister Bennet, have you heard?",
+		"Mrs. Long and Dr. Smith arrived.":        "Missus Long and Doctor Smith arrived.",
+		"They visited St. Paul with Capt. Hook.":  "They visited Saint Paul with Captain Hook.",
+		"John Smith Jr. met Prof. Jones.":         "John Smith Junior met Professor Jones.",
+	}
+	for in, want := range cases {
+		if got := expandTitleAbbreviations(in); got != want {
+			t.Errorf("expandTitleAbbreviations(%q)\n  got  %q\n  want %q", in, got, want)
+		}
+	}
+	// Must NOT touch real sentence-ending periods or non-title words.
+	keep := "He walked in. She left. The cat sat."
+	if got := expandTitleAbbreviations(keep); got != keep {
+		t.Errorf("altered normal sentence periods: %q", got)
+	}
+}

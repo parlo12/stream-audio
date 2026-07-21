@@ -29,6 +29,7 @@ type ttsEngineConfig struct {
 	APIKey               func() string
 	Model                string
 	SupportsInstructions bool // OpenAI instructions field (emotion steering)
+	ExpandTitles         bool // expand "Mr."→"Mister" etc. — Kokoro pauses on abbrev periods
 	NarratorVoice        string
 	UnknownVoice         string   // unnamed speech fallback
 	MalePool             []string // round-robin per-character pools
@@ -62,6 +63,7 @@ var kokoroEngine = ttsEngineConfig{
 	APIKey:               func() string { return os.Getenv("KOKORO_API_KEY") },
 	Model:                envStr("KOKORO_MODEL", "hexgrad/Kokoro-82M"),
 	SupportsInstructions: false,
+	ExpandTitles:         true, // Kokoro reads "Mr." as a sentence end → dead pause
 	NarratorVoice:        "bm_george",
 	UnknownVoice:         "bm_fable",
 	MalePool:             []string{"bm_lewis", "am_michael", "am_fenrir"},

@@ -51,9 +51,22 @@ func sharedAudioKey(engine, hash, ext string) string {
 	return fmt.Sprintf("shared/audio/%s/%s%s", engine, hash, ext)
 }
 
-// engineName resolves the pinned engine name for dedup keying.
+// renderVersion namespaces the shared cache. Bump it whenever a rendering
+// change must invalidate cached audio so pages re-render with the new pipeline
+// instead of reusing stale audio. v2 = title-abbreviation pause fix (Jul 2026:
+// "Mr." no longer inserts a dead pause). Old-version shared objects orphan and
+// are reaped by the GC.
+const renderVersion = "2"
+
+// engineName resolves the pinned engine name.
 func engineName(book Book) string {
 	return engineFor(book).Name
+}
+
+// dedupEngineKey is the engine identity used for the shared cache — engine
+// name plus render version, so a pipeline change starts a fresh namespace.
+func dedupEngineKey(book Book) string {
+	return engineName(book) + "-r" + renderVersion
 }
 
 // loadVoiceMapJSON returns the book's persisted voice_map as a raw JSON
@@ -186,7 +199,7 @@ func sharedAudioGCLoop() {
 // per-book from the shared audio (cheap, no AI cost).
 func reuseRenderedPageForChunk(book Book, chunk BookChunk) bool {
 	hash := contentHash(chunk.Content)
-	engine := engineName(book)
+	engine := dedupEngineKey(book)
 	rp, ok := lookupRenderedPage(hash, engine)
 	if !ok {
 		return false

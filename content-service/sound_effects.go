@@ -1388,7 +1388,7 @@ func processSoundEffectsAndMerge(book Book, hash string, pageIndexes []int) {
 		// the next book with identical text+engine reuses it (page_dedup.go),
 		// then register it. Matches the batch path (transcribePage).
 		pageHash := contentHash(chunk.Content)
-		engine := engineName(book)
+		engine := dedupEngineKey(book)
 		key := sharedAudioKey(engine, pageHash, filepath.Ext(mixedPath))
 		if _, uerr := uploadArtifact(context.Background(), mixedPath, key); uerr != nil {
 			log.Printf("❌ R2 upload failed for book_id=%d page=%d: %v", book.ID, idx, uerr)
