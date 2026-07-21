@@ -122,3 +122,44 @@ func TestExpandTitleAbbreviations(t *testing.T) {
 		t.Errorf("altered normal sentence periods: %q", got)
 	}
 }
+
+func TestWordSafeChunks_BreaksAtSentences(t *testing.T) {
+	// Long enough to force a break; ~1050 runes with sentence ends throughout,
+	// and a "Mr. Bennet" that must NOT be treated as a sentence boundary.
+	para := "Mr. Bennet was among the earliest of those who waited on him. " +
+		"He had always intended to visit, though to the last assuring his wife he should not go. "
+	text := strings.Repeat(para, 10) // ~1400 runes
+	runes := []rune(text)
+	spans := wordSafeChunks(runes, 1000)
+	if len(spans) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(spans))
+	}
+	// Every non-final chunk should end at a sentence terminator (after trimming).
+	for i := 0; i < len(spans)-1; i++ {
+		c := strings.TrimRight(string(runes[spans[i][0]:spans[i][1]]), " \t\n\"'”’)]")
+		last := c[len(c)-1]
+		if last != '.' && last != '!' && last != '?' {
+			t.Fatalf("chunk %d did not end at a sentence: ...%q", i, c[max0(len(c)-30):])
+		}
+		// and it must not end on "Mr" (abbreviation split)
+		if strings.HasSuffix(c, "Mr.") {
+			t.Fatalf("chunk %d broke after an abbreviation 'Mr.'", i)
+		}
+	}
+}
+
+func max0(x int) int { if x < 0 { return 0 }; return x }
+
+func TestIsSentenceEndAt(t *testing.T) {
+	check := func(s string, pos int, want bool) {
+		r := []rune(s)
+		if got := isSentenceEndAt(r, pos, len(r)); got != want {
+			t.Errorf("isSentenceEndAt(%q @%d)=%v want %v", s, pos, got, want)
+		}
+	}
+	check("He left. She stayed.", 7, true)     // '.' after "left" before " She"
+	check("Mr. Bennet arrived.", 2, false)     // abbreviation period
+	check("It cost 3.14 dollars.", 9, false)   // decimal
+	check("Who is there? He asked.", 12, true) // '?' sentence end
+	check("See J. Smith today.", 5, false)     // single-letter initial
+}

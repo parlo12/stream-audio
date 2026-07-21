@@ -18,19 +18,81 @@ import (
 	"rsc.io/pdf"
 )
 
-// wordSafeChunks splits runes into [start,end) spans of about chunkSize each,
-// but never mid-word: each cut is pulled back to the nearest whitespace within
-// a lookback window, and the whitespace run at the boundary is dropped so the
-// next chunk starts on a clean word. This fixes page breaks that split words
-// ("though" → "thoug" | "h") and made TTS mispronounce the last/first word of
-// every page. A pathological run with no whitespace in the window (rare — a
-// URL or OCR blob) falls back to a hard cut so chunking always progresses.
+// sentenceEndAbbrev are the words whose trailing period is NOT a sentence end,
+// so the chunker doesn't break a page in the middle of "Mr. Bennet".
+var sentenceEndAbbrev = map[string]bool{
+	"mr": true, "mrs": true, "ms": true, "mx": true, "dr": true, "prof": true,
+	"rev": true, "fr": true, "st": true, "mt": true, "capt": true, "col": true,
+	"gen": true, "lt": true, "sgt": true, "maj": true, "gov": true, "sen": true,
+	"hon": true, "jr": true, "sr": true, "vs": true, "etc": true, "eg": true,
+	"ie": true, "no": true, "vol": true, "pp": true, "ch": true,
+}
+
+// isSentenceEndAt reports whether runes[pos] closes a sentence: a . ! or ?
+// (plus any trailing quotes/brackets) followed by whitespace and a capital or
+// end — but NOT an abbreviation period ("Mr.") or a single-letter initial
+// ("J."). Deterministic, conservative: when unsure it says no, so the caller
+// falls back to a plain word boundary rather than break mid-sentence wrongly.
+func isSentenceEndAt(runes []rune, pos, total int) bool {
+	r := runes[pos]
+	if r != '.' && r != '!' && r != '?' {
+		return false
+	}
+	// Skip closing quotes/brackets after the terminator.
+	j := pos + 1
+	for j < total && strings.ContainsRune("\"'”’)]", runes[j]) {
+		j++
+	}
+	if j >= total {
+		return true // sentence terminator at the very end
+	}
+	if !unicode.IsSpace(runes[j]) {
+		return false // "3.14" or "U.S.A" — not a break
+	}
+	// The next non-space should open a new sentence (capital / quote / dash).
+	k := j
+	for k < total && unicode.IsSpace(runes[k]) {
+		k++
+	}
+	if k < total {
+		n := runes[k]
+		if !(unicode.IsUpper(n) || strings.ContainsRune("\"'“‘—-", n)) {
+			return false
+		}
+	}
+	// Abbreviation / initial guard (only for '.').
+	if r == '.' {
+		s := pos
+		for s > 0 && unicode.IsLetter(runes[s-1]) {
+			s--
+		}
+		word := strings.ToLower(string(runes[s:pos]))
+		if sentenceEndAbbrev[word] {
+			return false
+		}
+		if len(word) == 1 { // "J." initial
+			return false
+		}
+	}
+	return true
+}
+
+// wordSafeChunks splits runes into [start,end) spans of about chunkSize each.
+// It prefers to break at a SENTENCE boundary (a real ". ", "! ", "? " — not an
+// abbreviation like "Mr." or an initial), so a page never ends mid-sentence;
+// failing that it falls back to a WORD boundary (nearest whitespace) so it
+// never splits a word ("though" → "thoug" | "h"); and only a run with no
+// whitespace at all (a URL or OCR blob) forces a hard cut. Boundary whitespace
+// is dropped so the next chunk starts clean.
 func wordSafeChunks(runes []rune, chunkSize int) [][2]int {
 	total := len(runes)
 	if total == 0 {
 		return nil
 	}
-	const maxLookback = 200 // up to 20% of a 1000-rune page
+	const (
+		wordLookback     = 200 // fall back to a word boundary within this window
+		sentenceLookback = 300 // prefer a sentence end within this window
+	)
 	var spans [][2]int
 	i := 0
 	for i < total {
@@ -40,19 +102,42 @@ func wordSafeChunks(runes []rune, chunkSize int) [][2]int {
 		}
 		target := i + chunkSize
 		cut := -1
-		lo := target - maxLookback
-		if lo < i+1 {
-			lo = i + 1
+
+		// 1) Prefer the latest sentence end at/before target within the window.
+		sLo := target - sentenceLookback
+		if sLo < i+1 {
+			sLo = i + 1
 		}
-		for k := target; k >= lo; k-- {
-			if unicode.IsSpace(runes[k]) {
-				cut = k
+		for k := target; k >= sLo; k-- {
+			if isSentenceEndAt(runes, k, total) {
+				end := k + 1
+				for end < total && strings.ContainsRune("\"'”’)]", runes[end]) {
+					end++ // keep trailing quotes with the sentence
+				}
+				cut = end
 				break
 			}
 		}
+
+		// 2) Fall back to the nearest word boundary (whitespace).
 		if cut < 0 {
-			cut = target // no boundary in window: hard cut, guarantee progress
+			wLo := target - wordLookback
+			if wLo < i+1 {
+				wLo = i + 1
+			}
+			for k := target; k >= wLo; k-- {
+				if unicode.IsSpace(runes[k]) {
+					cut = k
+					break
+				}
+			}
 		}
+
+		// 3) Hard cut (no boundary in either window) to guarantee progress.
+		if cut < 0 {
+			cut = target
+		}
+
 		spans = append(spans, [2]int{i, cut})
 		j := cut
 		for j < total && unicode.IsSpace(runes[j]) {
