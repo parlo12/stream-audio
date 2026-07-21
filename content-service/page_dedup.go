@@ -57,9 +57,10 @@ func sharedAudioKey(engine, hash, ext string) string {
 // change must invalidate cached audio so pages re-render with the new pipeline
 // instead of reusing stale audio. v2 = title-abbreviation pause fix. v3 =
 // fluency (collapse OCR mid-sentence newlines + space-before-punct) + event-
-// based scoring (music only on dramatic pages, not every page). Old-version
-// shared objects orphan and are reaped by the GC.
-const renderVersion = "3"
+// based scoring (music only on dramatic pages, not every page). v4 = emotional
+// intonation (sharper brain emotion detection + Kokoro emotion→speaking-rate
+// pacing). Old-version shared objects orphan and are reaped by the GC.
+const renderVersion = "4"
 
 // engineName resolves the pinned engine name.
 func engineName(book Book) string {

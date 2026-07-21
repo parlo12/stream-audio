@@ -258,7 +258,11 @@ IMPORTANT RULES:
 3. Determine the speaker's gender (male/female/unknown) from context clues: "he said", "she replied", names, pronouns
 4. Dialogue should be read in FIRST PERSON by the character (just the words they speak)
 5. Narration includes dialogue tags like "he said" or "she whispered"
-6. Give each segment an "emotion": one of "neutral", "angry", "sad", "happy", "fearful", "excited", "tender", "whispering", "shouting", "sarcastic"
+6. Give each segment an "emotion" — the feeling the AUTHOR is conveying in that line — chosen from: "neutral", "angry", "sad", "happy", "fearful", "excited", "tender", "whispering", "shouting", "sarcastic". Infer it from the evidence in the text, do not default to "neutral" when the passage signals feeling:
+   - Dialogue tags and stage directions: "she cried"/"he exclaimed" → excited or shouting; "he whispered"/"she murmured" → whispering; "she sobbed"/"he said sadly" → sad; "he snapped"/"she raged" → angry; "he teased"/"she said dryly/ironically" → sarcastic; "she said softly/lovingly" → tender; "he trembled"/"she gasped in terror" → fearful
+   - Punctuation: "!" → excited/angry/shouting depending on the words; a trailing "..." → hesitant, often fearful or tender
+   - Word choice and situation: threats, insults, exclamations → angry/shouting; endearments, comfort, affection → tender; joy, good news, laughter → happy/excited; grief, loss, weeping → sad; dread, danger → fearful; mockery, irony, backhanded praise → sarcastic
+   - Narration takes the mood of what it describes (a tense chase → fearful, a joyful reunion → happy); use "neutral" only for genuinely flat, matter-of-fact prose
 7. Keep segments in the exact order they appear in TEXT TO SEGMENT
 8. Do NOT modify, drop, or add any text — the segments must contain exactly the TEXT TO SEGMENT, nothing from the previous context
 9. If quoting is ambiguous or broken (e.g. OCR artifacts), treat the passage as narration
@@ -491,6 +495,34 @@ func getInstructionsForSegment(segment DialogueSegment) string {
 	return base
 }
 
+// emotionSpeed maps a segment's emotion to a Kokoro speaking-rate multiplier.
+// Kokoro (via DeepInfra) exposes no emotion/instructions field — only speed —
+// so we convey feeling through PACING, which is a genuine emotional cue: grief
+// and tenderness slow the voice, excitement and fear quicken it. Kept subtle
+// (±10%) so the line reads as felt, not obviously sped-up or slowed-down. The
+// author's own punctuation (? ! …) still colours intonation on top of this,
+// since Kokoro honours it. Returns 1.0 (normal rate) for neutral/unknown.
+func emotionSpeed(emotion string) float64 {
+	switch strings.ToLower(strings.TrimSpace(emotion)) {
+	case "excited", "happy":
+		return 1.08
+	case "fearful":
+		return 1.06
+	case "shouting":
+		return 1.05
+	case "angry":
+		return 1.04
+	case "sarcastic":
+		return 0.95
+	case "tender":
+		return 0.92
+	case "sad", "whispering":
+		return 0.90
+	default:
+		return 1.0
+	}
+}
+
 // generateSegmentAudio generates audio for a single dialogue segment
 func generateSegmentAudio(segment DialogueSegment, bookID uint, segmentIndex int, cfg *ttsEngineConfig) (string, error) {
 	apiKey := cfg.APIKey()
@@ -508,11 +540,17 @@ func generateSegmentAudio(segment DialogueSegment, bookID uint, segmentIndex int
 
 	voice := getVoiceForSegment(segment, cfg)
 	instructions := ""
+	speed := 1.0
 	if cfg.SupportsInstructions {
+		// Instruction-capable engine (OpenAI): emotion goes in the prose
+		// instructions; leave rate neutral so we don't double-apply.
 		instructions = getInstructionsForSegment(segment)
+	} else {
+		// Kokoro has no instructions field — convey emotion through pacing.
+		speed = emotionSpeed(segment.Emotion)
 	}
 
-	log.Printf("🎙️ Generating segment %d: engine=%s voice=%s, type=%s, speaker=%s", segmentIndex, cfg.Name, voice, segment.Type, segment.Speaker)
+	log.Printf("🎙️ Generating segment %d: engine=%s voice=%s, type=%s, speaker=%s, emotion=%s, speed=%.2f", segmentIndex, cfg.Name, voice, segment.Type, segment.Speaker, segment.Emotion, speed)
 
 	payload := TTSPayload{
 		Input:          text,
@@ -520,7 +558,7 @@ func generateSegmentAudio(segment DialogueSegment, bookID uint, segmentIndex int
 		Voice:          voice,
 		Instructions:   instructions,
 		ResponseFormat: "mp3",
-		Speed:          1.0,
+		Speed:          speed,
 	}
 	reqBody, _ := json.Marshal(payload)
 
