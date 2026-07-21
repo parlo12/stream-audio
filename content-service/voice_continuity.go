@@ -46,6 +46,27 @@ func normalizeSpeaker(name string) string {
 	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(name))), " ")
 }
 
+// placeholderSpeakers are non-names the model falls back to when it can't
+// attribute a line (e.g. a page break hid the "said Mrs. Bennet" tag). They
+// must NOT become cast members: "unknown male" previously slipped through as a
+// named character, took a male-pool voice, and voiced women in a man's voice.
+// Treat all of these as unattributed → the neutral UnknownVoice instead.
+var placeholderSpeakers = map[string]bool{
+	"": true, "unknown": true,
+	"unknown male": true, "unknown female": true,
+	"unknown man": true, "unknown woman": true,
+	"unknown speaker": true, "unknown character": true,
+	"man": true, "woman": true, "boy": true, "girl": true,
+	"someone": true, "somebody": true, "person": true,
+	"speaker": true, "voice": true, "narrator": true,
+}
+
+// isPlaceholderSpeaker reports whether a normalized speaker name is a
+// non-attributable placeholder rather than a real character.
+func isPlaceholderSpeaker(key string) bool {
+	return placeholderSpeakers[key]
+}
+
 // loadVoiceMap reads the book's persisted cast (empty map if none).
 func loadVoiceMap(bookID uint) map[string]CharacterVoice {
 	var b Book
@@ -110,8 +131,10 @@ func assignSegmentVoices(vm map[string]CharacterVoice, segments []DialogueSegmen
 			continue
 		}
 		key := normalizeSpeaker(s.Speaker)
-		if key == "" || key == "unknown" {
+		if isPlaceholderSpeaker(key) {
+			// Unattributed line — neutral voice, no gender guess, never cast it.
 			s.Voice = cfg.UnknownVoice
+			s.Gender = "unknown"
 			continue
 		}
 		cv, ok := vm[key]

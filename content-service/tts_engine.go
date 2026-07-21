@@ -105,3 +105,27 @@ func engineForBookID(bookID uint) *ttsEngineConfig {
 	}
 	return engineFor(b)
 }
+
+// hybridDialogueEngine returns the engine to render DIALOGUE segments on when
+// hybrid narration/dialogue rendering is enabled, or nil for no split (dialogue
+// renders on the book's base engine). Narration ALWAYS uses the base engine.
+//
+// Rationale: Kokoro is ~$0.04/audio-hr but flat; an instruction-capable engine
+// (OpenAI gpt-4o-mini-tts) gives characters real emotional timbre. Since a book
+// is mostly narration, routing only the ~40% dialogue to the pricier engine
+// keeps cost low (~$6/novel vs ~$54 all-OpenAI) while the characters come alive.
+//
+// Enabled globally via HYBRID_DIALOGUE_ENGINE (e.g. "openai"). Returns nil when
+// unset, unknown, or equal to the base engine (an all-OpenAI book needs no
+// split). The choice is global so cross-user dedup stays coherent — every book
+// on a given base engine renders dialogue the same way.
+func hybridDialogueEngine(base *ttsEngineConfig) *ttsEngineConfig {
+	name := strings.ToLower(strings.TrimSpace(os.Getenv("HYBRID_DIALOGUE_ENGINE")))
+	if name == "" || base == nil || name == base.Name {
+		return nil
+	}
+	if cfg, ok := ttsEngines[name]; ok {
+		return cfg
+	}
+	return nil
+}

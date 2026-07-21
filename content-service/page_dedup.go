@@ -59,8 +59,11 @@ func sharedAudioKey(engine, hash, ext string) string {
 // fluency (collapse OCR mid-sentence newlines + space-before-punct) + event-
 // based scoring (music only on dramatic pages, not every page). v4 = emotional
 // intonation (sharper brain emotion detection + Kokoro emotion→speaking-rate
-// pacing). Old-version shared objects orphan and are reaped by the GC.
-const renderVersion = "4"
+// pacing). v5 = attribution fix (no "unknown male" mis-casting, cross-break
+// speaker carry/alternation) + hybrid per-segment engine routing (narration on
+// base engine, dialogue on the expressive engine) + uniform merge re-encode.
+// Old-version shared objects orphan and are reaped by the GC.
+const renderVersion = "5"
 
 // engineName resolves the pinned engine name.
 func engineName(book Book) string {
@@ -68,9 +71,17 @@ func engineName(book Book) string {
 }
 
 // dedupEngineKey is the engine identity used for the shared cache — engine
-// name plus render version, so a pipeline change starts a fresh namespace.
+// name plus render version, so a pipeline change starts a fresh namespace. When
+// hybrid rendering is on, the dialogue engine is folded in so hybrid audio
+// (e.g. "kokoro+openai-r5") never collides with pure-engine audio ("kokoro-r5")
+// or a book rendered under a different dialogue engine.
 func dedupEngineKey(book Book) string {
-	return engineName(book) + "-r" + renderVersion
+	base := engineFor(book)
+	key := base.Name
+	if dlg := hybridDialogueEngine(base); dlg != nil {
+		key += "+" + dlg.Name
+	}
+	return key + "-r" + renderVersion
 }
 
 // loadVoiceMapJSON returns the book's persisted voice_map as a raw JSON

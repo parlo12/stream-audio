@@ -254,8 +254,10 @@ func analyzeDialogue(rawText, prevTail string, cast map[string]CharacterVoice, c
 
 IMPORTANT RULES:
 1. Identify dialogue vs narration. Dialogue may use "straight quotes", “curly quotes”, 'single quotes', or an em-dash at the start of a line (— Hello.)
-2. For each dialogue segment, name the speaker. If the speaker matches a KNOWN CHARACTER, reuse that EXACT name (e.g. a nickname or "she" resolving to a known character)
-3. Determine the speaker's gender (male/female/unknown) from context clues: "he said", "she replied", names, pronouns
+2. For each dialogue segment, name the speaker. If the speaker matches a KNOWN CHARACTER (listed below), reuse that EXACT name — resolve nicknames and pronouns ("she", "Lizzy") to the canonical known name. Prefer a known character over inventing a new one.
+2a. ATTRIBUTION ACROSS BREAKS: the "said X" tag for a line may fall in the PREVIOUS CONTEXT, not in this passage. Use the previous context to carry the speaker forward. In a back-and-forth between two speakers, dialogue ALTERNATES: if a quoted line has no explicit tag but clearly continues an exchange, attribute it to the OTHER of the two most recent speakers rather than leaving it unknown.
+2b. NEVER use a placeholder as a speaker name — do NOT output "unknown male", "unknown woman", "man", "woman", "speaker", or "voice" as the speaker. If, after using the cast and previous context, you genuinely cannot identify who is speaking, set "speaker" to "" and "gender" to "unknown". Do not guess a gender for an unidentified speaker.
+3. Determine an identified speaker's gender (male/female) from context clues: "he said", "she replied", names, pronouns. Only use "unknown" gender when the speaker itself is unknown or genuinely genderless (e.g. "the voice", a crowd).
 4. Dialogue should be read in FIRST PERSON by the character (just the words they speak)
 5. Narration includes dialogue tags like "he said" or "she whispered"
 6. Give each segment an "emotion" — the feeling the AUTHOR is conveying in that line — chosen from: "neutral", "angry", "sad", "happy", "fearful", "excited", "tender", "whispering", "shouting", "sarcastic". Infer it from the evidence in the text, do not default to "neutral" when the passage signals feeling:
@@ -642,8 +644,13 @@ func mergeAudioSegments(segmentPaths []string, outputPath string) error {
 	}
 	defer os.Remove(listPath)
 
-	// Use FFmpeg to concatenate
-	cmd := exec.Command("ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outputPath)
+	// Re-encode (not -c copy) to a uniform 24 kHz mono mp3. Segments may come
+	// from different TTS engines in hybrid mode (Kokoro narration at 56 kbps +
+	// OpenAI dialogue at 128 kbps), and stream-copying mixed bitrates can leave
+	// audible clicks at segment seams. A single re-encode guarantees clean,
+	// gapless boundaries; quality loss at -q:a 2 is inaudible.
+	cmd := exec.Command("ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listPath,
+		"-c:a", "libmp3lame", "-ar", "24000", "-ac", "1", "-q:a", "2", outputPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ffmpeg concat failed: %w, output: %s", err, string(output))
@@ -659,7 +666,7 @@ func mergeAudioSegments(segmentPaths []string, outputPath string) error {
 // one voice for the whole book (audit H1).
 func convertTextToAudioForChunk(chunk BookChunk) (string, error) {
 	vm := loadVoiceMap(chunk.BookID)
-	prevTail := prevChunkTail(chunk.BookID, chunk.Index, 200)
+	prevTail := prevChunkTail(chunk.BookID, chunk.Index, 400)
 	return convertTextToAudioMultiVoice(chunk.Content, chunk.ID, chunk.BookID, prevTail, vm)
 }
 
@@ -703,8 +710,18 @@ func convertTextToAudioMultiVoice(text string, audioID uint, bookID uint, prevTa
 		return convertTextToAudioSingleVoice(text, audioID, cfg)
 	}
 
-	// Step 1b: stable per-character voices; persist newly met characters.
-	if changed := assignSegmentVoices(vm, segments, cfg); changed && bookID != 0 {
+	// Hybrid rendering: narration on the base engine (cheap), dialogue on the
+	// configured dialogue engine (expressive). dlgCfg == cfg when hybrid is off.
+	dlgCfg := cfg
+	if h := hybridDialogueEngine(cfg); h != nil {
+		dlgCfg = h
+		log.Printf("🎚️ [Hybrid] book %d: narration=%s, dialogue=%s", bookID, cfg.Name, dlgCfg.Name)
+	}
+
+	// Step 1b: stable per-character voices; persist newly met characters. Cast
+	// against the DIALOGUE engine's pools — characters only ever speak via the
+	// dialogue engine, so their voice ids must be valid there.
+	if changed := assignSegmentVoices(vm, segments, dlgCfg); changed && bookID != 0 {
 		saveVoiceMap(bookID, vm)
 	}
 
@@ -717,7 +734,11 @@ func convertTextToAudioMultiVoice(text string, audioID uint, bookID uint, prevTa
 			continue
 		}
 
-		path, err := generateSegmentAudio(segment, audioID, i, cfg)
+		segCfg := cfg
+		if segment.IsDialogue {
+			segCfg = dlgCfg // route character lines to the expressive engine
+		}
+		path, err := generateSegmentAudio(segment, audioID, i, segCfg)
 		if err != nil {
 			log.Printf("⚠️ Failed to generate segment %d: %v", i, err)
 			continue
