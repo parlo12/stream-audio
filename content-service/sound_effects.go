@@ -563,20 +563,27 @@ func mergeAudio(ttsPath, bgPath string, book Book, pageIndex int, excerpt string
 	// sound design on a biography is wrong, and skipping saves two GPT calls.
 	profile := getOrCreateAudioProfile(book)
 
-	// Generate mood segments with crossfade transitions (Q1: analyze this
-	// page's own text, not the first page of the whole book).
-	var segs []Segment
-	if profile.Fiction {
-		segs, err = generateSegmentInstructions(dur, excerpt)
+	// Event-based scoring: backgroundMusicForPage returns "" for a neutral
+	// page (no music). Only build the music track when there IS a cue — this
+	// also skips the mood-window GPT call on unscored pages.
+	hasMusic := strings.TrimSpace(bgPath) != ""
+	dynBg := ""
+	if hasMusic {
+		// Mood windows shape the music's dynamics across the page (Q1: analyze
+		// this page's own text, not the first page of the whole book).
+		var segs []Segment
+		if profile.Fiction {
+			segs, err = generateSegmentInstructions(dur, excerpt)
+			if err != nil {
+				return "", err
+			}
+		} else {
+			segs = fallbackSegments(dur) // all-neutral, no GPT call
+		}
+		dynBg, err = generateDynamicBackgroundWithSegments(dur, bgPath, segs, jobDir)
 		if err != nil {
 			return "", err
 		}
-	} else {
-		segs = fallbackSegments(dur) // all-neutral, no GPT call
-	}
-	dynBg, err := generateDynamicBackgroundWithSegments(dur, bgPath, segs, jobDir)
-	if err != nil {
-		return "", err
 	}
 
 	outFile := fmt.Sprintf("./audio/book_%d_page_%d_%s.mp3", book.ID, pageIndex, shortHash(hash))
@@ -610,35 +617,31 @@ func mergeAudio(ttsPath, bgPath string, book Book, pageIndex int, excerpt string
 		log.Printf("🌲 [Mix] Skipping ambient (neutral setting with low intensity)")
 	}
 
+	// Q5: explicit weights so amix never averages (which would halve narration
+	// volume). Four cases depending on which layers this page actually has.
 	var cmd *exec.Cmd
-	if ambientPath != "" {
-		// 3-layer mix: TTS + Music + Ambient. Q5: explicit weights so amix
-		// does not average (which would halve narration volume).
+	switch {
+	case dynBg != "" && ambientPath != "":
 		filterComplex := "[0:a]volume=1.0[tts];[1:a]volume=1.0[mus];[2:a]volume=1.0[amb];[tts][mus][amb]amix=inputs=3:duration=first:normalize=0:weights=1.0 0.3 0.15[aout]"
-		cmd = exec.Command("ffmpeg", "-y",
-			"-i", ttsPath,
-			"-i", dynBg,
-			"-i", ambientPath,
-			"-filter_complex", filterComplex,
-			"-map", "[aout]",
-			"-c:a", "libmp3lame",
-			"-q:a", "2",
-			outFile,
-		)
-		log.Printf("🎚️ [Mix] 3-layer mix: TTS + Music + Ambient")
-	} else {
-		// 2-layer mix: TTS + Music. Q5: explicit weights (no averaging).
+		cmd = exec.Command("ffmpeg", "-y", "-i", ttsPath, "-i", dynBg, "-i", ambientPath,
+			"-filter_complex", filterComplex, "-map", "[aout]", "-c:a", "libmp3lame", "-q:a", "2", outFile)
+		log.Printf("🎚️ [Mix] 3-layer: TTS + Music + Ambient")
+	case dynBg != "":
 		filterComplex := "[0:a]volume=1.0[tts];[1:a]volume=1.0[mus];[tts][mus]amix=inputs=2:duration=first:normalize=0:weights=1.0 0.3[aout]"
-		cmd = exec.Command("ffmpeg", "-y",
-			"-i", ttsPath,
-			"-i", dynBg,
-			"-filter_complex", filterComplex,
-			"-map", "[aout]",
-			"-c:a", "libmp3lame",
-			"-q:a", "2",
-			outFile,
-		)
-		log.Printf("🎚️ [Mix] 2-layer mix: TTS + Music")
+		cmd = exec.Command("ffmpeg", "-y", "-i", ttsPath, "-i", dynBg,
+			"-filter_complex", filterComplex, "-map", "[aout]", "-c:a", "libmp3lame", "-q:a", "2", outFile)
+		log.Printf("🎚️ [Mix] 2-layer: TTS + Music (event)")
+	case ambientPath != "":
+		// No music (neutral page) but there's an ambient bed — subtle
+		// atmosphere under the narration, no score.
+		filterComplex := "[0:a]volume=1.0[tts];[1:a]volume=1.0[amb];[tts][amb]amix=inputs=2:duration=first:normalize=0:weights=1.0 0.15[aout]"
+		cmd = exec.Command("ffmpeg", "-y", "-i", ttsPath, "-i", ambientPath,
+			"-filter_complex", filterComplex, "-map", "[aout]", "-c:a", "libmp3lame", "-q:a", "2", outFile)
+		log.Printf("🎚️ [Mix] 2-layer: TTS + Ambient (no music)")
+	default:
+		// Pure narration — the common case now on neutral pages.
+		cmd = exec.Command("ffmpeg", "-y", "-i", ttsPath, "-c:a", "libmp3lame", "-q:a", "2", outFile)
+		log.Printf("🎚️ [Mix] narration only (no music, no ambient)")
 	}
 
 	if o, err := cmd.CombinedOutput(); err != nil {

@@ -55,10 +55,11 @@ func sharedAudioKey(engine, hash, ext string) string {
 
 // renderVersion namespaces the shared cache. Bump it whenever a rendering
 // change must invalidate cached audio so pages re-render with the new pipeline
-// instead of reusing stale audio. v2 = title-abbreviation pause fix (Jul 2026:
-// "Mr." no longer inserts a dead pause). Old-version shared objects orphan and
-// are reaped by the GC.
-const renderVersion = "2"
+// instead of reusing stale audio. v2 = title-abbreviation pause fix. v3 =
+// fluency (collapse OCR mid-sentence newlines + space-before-punct) + event-
+// based scoring (music only on dramatic pages, not every page). Old-version
+// shared objects orphan and are reaped by the GC.
+const renderVersion = "3"
 
 // engineName resolves the pinned engine name.
 func engineName(book Book) string {

@@ -346,10 +346,19 @@ func backgroundMusicForPage(book Book, pageText string) (string, error) {
 		return getOrGenerateBackgroundMusic(prompt)
 	}
 	mood := pickCueForPage(pageText, cues)
+	// Event-based scoring: professional dramatized audiobooks use music with
+	// restraint — at emotionally significant moments, not wall-to-wall. A
+	// "neutral" page (most pages) gets NO music, so the score enters only when
+	// the scene turns dramatic (suspense/action/climax/sad) and lands as an
+	// event rather than a loop droning under every line.
+	if mood == "neutral" {
+		log.Printf("🎼 [Palette] book %d page mood neutral → no music (narration only)", book.ID)
+		return "", nil
+	}
 	cue, ok := cueForMood(cues, mood)
 	if !ok {
-		return "", errors.New("empty palette")
+		return "", nil // no cue for this mood → narration only, not an error
 	}
-	log.Printf("🎼 [Palette] book %d page mood %q → cue %s", book.ID, mood, cue.Mood)
+	log.Printf("🎼 [Palette] book %d page mood %q → cue %s (event music)", book.ID, mood, cue.Mood)
 	return localScoreClip(book.ID, cue)
 }

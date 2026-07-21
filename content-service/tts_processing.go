@@ -199,16 +199,23 @@ func cleanupForTTS(text string) string {
 	}
 	text = result.String()
 
-	// Clean up extra whitespace
+	// Collapse ALL whitespace runs — including OCR mid-sentence line-wrap
+	// newlines — to a single space so the voice reads fluently. A stray "\n"
+	// inside a sentence ("A single man of\nlarge fortune") makes Kokoro pause
+	// as if it were a line break; joining the wrapped line removes that.
+	text = ttsWhitespaceRe.ReplaceAllString(text, " ")
+	// Tidy scanner-artifact space-before-punctuation ("fortune ; four" →
+	// "fortune; four", "girls !" → "girls!") which also skews prosody.
+	text = ttsSpaceBeforePunctRe.ReplaceAllString(text, "$1")
 	text = strings.TrimSpace(text)
-
-	// Replace multiple spaces with single space
-	for strings.Contains(text, "  ") {
-		text = strings.ReplaceAll(text, "  ", " ")
-	}
 
 	return text
 }
+
+var (
+	ttsWhitespaceRe      = regexp.MustCompile(`\s+`)
+	ttsSpaceBeforePunctRe = regexp.MustCompile(` +([,.;:!?])`)
+)
 
 // truncateLog truncates a string for logging purposes
 func truncateLog(s string, maxLen int) string {

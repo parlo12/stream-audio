@@ -163,3 +163,21 @@ func TestIsSentenceEndAt(t *testing.T) {
 	check("Who is there? He asked.", 12, true) // '?' sentence end
 	check("See J. Smith today.", 5, false)     // single-letter initial
 }
+
+func TestCleanupForTTS_FluencyNormalization(t *testing.T) {
+	// OCR mid-sentence newline must become a space (no Kokoro pause), and
+	// space-before-punctuation must be tidied.
+	in := "A single man of \nlarge fortune ; four or five thousand a year . What a fine\nthing for our girls !"
+	got := cleanupForTTS(in)
+	if strings.Contains(got, "\n") {
+		t.Fatalf("newlines survived: %q", got)
+	}
+	for _, bad := range []string{" ;", " .", " !", "of \nlarge", "of  large"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("artifact %q survived: %q", bad, got)
+		}
+	}
+	if !strings.Contains(got, "man of large fortune;") || !strings.Contains(got, "girls!") {
+		t.Fatalf("expected clean flowing text, got: %q", got)
+	}
+}
