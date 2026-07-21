@@ -93,21 +93,21 @@ var kokoroEngine = ttsEngineConfig{
 // override per pool via env, and confirm against GET /v1/voices on activation.
 var (
 	elevenMalePool = []string{
-		firstNonEmpty(os.Getenv("ELEVEN_MALE_1"), "pNInz6obpgDQGcFmaJgB"), // Adam
-		firstNonEmpty(os.Getenv("ELEVEN_MALE_2"), "TxGEqnHWrfWFTfGW9XjX"), // Josh
-		firstNonEmpty(os.Getenv("ELEVEN_MALE_3"), "VR6AewLTigWG4xSOukaG"), // Arnold
-		firstNonEmpty(os.Getenv("ELEVEN_MALE_4"), "ErXwobaYiN019PkySvjV"), // Antoni
+		firstNonEmpty(os.Getenv("ELEVEN_MALE_1"), "JBFqnCBsd6RMkjVDRZzb"), // George — warm storyteller
+		firstNonEmpty(os.Getenv("ELEVEN_MALE_2"), "CwhRBWXzGAHq8TQ4Fs17"), // Roger — laid-back, resonant
+		firstNonEmpty(os.Getenv("ELEVEN_MALE_3"), "IKne3meq5aSn9XLyUdCD"), // Charlie — deep, confident
+		firstNonEmpty(os.Getenv("ELEVEN_MALE_4"), "TX3LPaxmHKxFdv7VOQHJ"), // Liam — energetic
 	}
 	elevenFemalePool = []string{
-		firstNonEmpty(os.Getenv("ELEVEN_FEMALE_1"), "21m00Tcm4TlvDq8ikWAM"), // Rachel
-		firstNonEmpty(os.Getenv("ELEVEN_FEMALE_2"), "EXAVITQu4vr4xnSDxMaL"), // Bella
-		firstNonEmpty(os.Getenv("ELEVEN_FEMALE_3"), "MF3mGyEYCl7XYWbV9V6O"), // Elli
-		firstNonEmpty(os.Getenv("ELEVEN_FEMALE_4"), "AZnzlk1XvdvUeBnXmlld"), // Domi
+		firstNonEmpty(os.Getenv("ELEVEN_FEMALE_1"), "EXAVITQu4vr4xnSDxMaL"), // Sarah — mature, confident
+		firstNonEmpty(os.Getenv("ELEVEN_FEMALE_2"), "FGY2WhTYpPnrIDTdsKH5"), // Laura — quirky, enthusiast
+		firstNonEmpty(os.Getenv("ELEVEN_FEMALE_3"), "Xb7hH8MSUJpSbSDYk0k2"), // Alice — clear, engaging
+		firstNonEmpty(os.Getenv("ELEVEN_FEMALE_4"), "XrExE9yKIg1WjnnlVkGX"), // Matilda — professional
 	}
 	elevenUnknownPool = []string{
-		firstNonEmpty(os.Getenv("ELEVEN_UNKNOWN_1"), "yoZ06aMxZJJ28mfd3POQ"), // Sam
-		firstNonEmpty(os.Getenv("ELEVEN_UNKNOWN_2"), "ThT5KcBeYPX3keUQqHPh"), // Dorothy
-		firstNonEmpty(os.Getenv("ELEVEN_UNKNOWN_3"), "IKne3meq5aSn9XLyUdCD"), // Charlie
+		firstNonEmpty(os.Getenv("ELEVEN_UNKNOWN_1"), "SAz9YHcvj6GT2YYXdXww"), // River — neutral
+		firstNonEmpty(os.Getenv("ELEVEN_UNKNOWN_2"), "N2lVS1w4EtoT3dr4eOWO"), // Callum — husky
+		firstNonEmpty(os.Getenv("ELEVEN_UNKNOWN_3"), "bIHbv24MWmeRgasZH58o"), // Will — relaxed
 	}
 )
 
@@ -115,12 +115,12 @@ var elevenEngine = ttsEngineConfig{
 	Name:                 "eleven",
 	Provider:             "elevenlabs",
 	Endpoint:             envStr("ELEVEN_TTS_ENDPOINT", "https://api.elevenlabs.io/v1/text-to-speech"),
-	APIKey:               func() string { return os.Getenv("ELEVENLABS_API_KEY") },
+	APIKey:               func() string { return firstNonEmpty(os.Getenv("XI_API_KEY"), os.Getenv("ELEVENLABS_API_KEY")) },
 	Model:                envStr("ELEVEN_MODEL", "eleven_v3"),
 	SupportsInstructions: false, // emotion via inline audio tags, not a prose field
 	ExpandTitles:         false, // Eleven reads "Mr." naturally; keep author text intact
-	NarratorVoice:        firstNonEmpty(os.Getenv("ELEVEN_NARRATOR_VOICE"), "pNInz6obpgDQGcFmaJgB"),
-	UnknownVoice:         firstNonEmpty(os.Getenv("ELEVEN_UNKNOWN_VOICE"), "yoZ06aMxZJJ28mfd3POQ"),
+	NarratorVoice:        firstNonEmpty(os.Getenv("ELEVEN_NARRATOR_VOICE"), "JBFqnCBsd6RMkjVDRZzb"), // George (unused — narrator is Kokoro)
+	UnknownVoice:         firstNonEmpty(os.Getenv("ELEVEN_UNKNOWN_VOICE"), "SAz9YHcvj6GT2YYXdXww"), // River — neutral
 	MalePool:             elevenMalePool,
 	FemalePool:           elevenFemalePool,
 	UnknownPool:          elevenUnknownPool,
