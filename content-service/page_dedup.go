@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -168,28 +170,83 @@ func gcOrphanedSharedRenderings(graceMinutes, limit int) (int, error) {
 	return removed, nil
 }
 
-// gcSharedAudioHandler (admin) runs the orphan sweep on demand. Optional
-// ?grace_minutes= override (default 60); returns how many were removed.
-func gcSharedAudioHandler(c *gin.Context) {
-	grace := envIntQuery(c, "grace_minutes", 60, 1_000_000)
-	removed, err := gcOrphanedSharedRenderings(grace, 5000)
+// gcOrphanedLocalAudio deletes stale working files from the local audio scratch
+// volume. Rendering writes intermediates here (per-segment TTS, pre-upload
+// mixes, downloaded library clips) and uploads finals to R2 — the app never
+// serves a local path (verified: 0 chunks reference one). Files older than the
+// grace window belong to long-finished renders; library clips just re-download
+// from R2 on next use. The modtime guard means active renders (files touched
+// within minutes) are never removed. Only top-level files are swept (HLS temp
+// dirs live in the OS tmp dir, not here).
+func gcOrphanedLocalAudio(graceHours int) (int, int64, error) {
+	dir := getEnv("AUDIO_STORAGE_PATH", "./audio")
+	cutoff := time.Now().Add(-time.Duration(graceHours) * time.Hour)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+		if os.IsNotExist(err) {
+			return 0, 0, nil
+		}
+		return 0, 0, err
 	}
-	c.JSON(http.StatusOK, gin.H{"removed": removed})
+	var n int
+	var freed int64
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err == nil {
+			n++
+			freed += info.Size()
+		}
+	}
+	if n > 0 {
+		log.Printf("🧹 [GC] removed %d stale local work file(s), freed %.1f MB", n, float64(freed)/1e6)
+	}
+	return n, freed, nil
 }
 
-// sharedAudioGCLoop runs the orphan sweep once a day in the worker.
+// runGC executes both sweeps: orphaned shared R2 renderings and stale local
+// work files. Shared by the daily loop and the admin endpoint.
+func runGC(sharedGraceMinutes, localGraceHours, sharedLimit int) (shared int, localN int, localFreed int64) {
+	if s, err := gcOrphanedSharedRenderings(sharedGraceMinutes, sharedLimit); err != nil {
+		log.Printf("⚠️ [GC] shared sweep failed: %v", err)
+	} else {
+		shared = s
+	}
+	if n, freed, err := gcOrphanedLocalAudio(localGraceHours); err != nil {
+		log.Printf("⚠️ [GC] local sweep failed: %v", err)
+	} else {
+		localN, localFreed = n, freed
+	}
+	return
+}
+
+// gcSharedAudioHandler (admin) runs both GC sweeps on demand. Optional
+// ?grace_minutes= (shared, default 60) and ?local_grace_hours= (default 24).
+func gcSharedAudioHandler(c *gin.Context) {
+	sGrace := envIntQuery(c, "grace_minutes", 60, 1_000_000)
+	lGrace := envIntQuery(c, "local_grace_hours", 24, 100_000)
+	shared, localN, localFreed := runGC(sGrace, lGrace, 5000)
+	c.JSON(http.StatusOK, gin.H{
+		"shared_removed":  shared,
+		"local_removed":   localN,
+		"local_freed_mb":  localFreed / 1_000_000,
+	})
+}
+
+// sharedAudioGCLoop runs both orphan sweeps once a day in the worker.
 func sharedAudioGCLoop() {
 	interval := time.Duration(envInt("SHARED_GC_INTERVAL_MINUTES", 1440)) * time.Minute
-	grace := envInt("SHARED_GC_GRACE_MINUTES", 60)
+	sGrace := envInt("SHARED_GC_GRACE_MINUTES", 60)
+	lGrace := envInt("LOCAL_AUDIO_GC_GRACE_HOURS", 24)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for range ticker.C {
-		if _, err := gcOrphanedSharedRenderings(grace, 1000); err != nil {
-			log.Printf("⚠️ [GC] sweep failed: %v", err)
-		}
+		runGC(sGrace, lGrace, 1000)
 	}
 }
 
