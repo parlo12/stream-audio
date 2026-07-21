@@ -543,33 +543,25 @@ func generateSegmentAudio(segment DialogueSegment, bookID uint, segmentIndex int
 	voice := getVoiceForSegment(segment, cfg)
 	instructions := ""
 	speed := 1.0
-	if cfg.SupportsInstructions {
+	switch {
+	case cfg.Provider == "elevenlabs":
+		// Eleven conveys emotion through inline audio tags, injected in
+		// buildTTSRequest — no instructions field, no speed param.
+	case cfg.SupportsInstructions:
 		// Instruction-capable engine (OpenAI): emotion goes in the prose
 		// instructions; leave rate neutral so we don't double-apply.
 		instructions = getInstructionsForSegment(segment)
-	} else {
+	default:
 		// Kokoro has no instructions field — convey emotion through pacing.
 		speed = emotionSpeed(segment.Emotion)
 	}
 
 	log.Printf("🎙️ Generating segment %d: engine=%s voice=%s, type=%s, speaker=%s, emotion=%s, speed=%.2f", segmentIndex, cfg.Name, voice, segment.Type, segment.Speaker, segment.Emotion, speed)
 
-	payload := TTSPayload{
-		Input:          text,
-		Model:          cfg.Model,
-		Voice:          voice,
-		Instructions:   instructions,
-		ResponseFormat: "mp3",
-		Speed:          speed,
-	}
-	reqBody, _ := json.Marshal(payload)
-
-	req, err := http.NewRequest("POST", cfg.Endpoint, bytes.NewReader(reqBody))
+	req, err := buildTTSRequest(cfg, apiKey, text, voice, instructions, speed, segment)
 	if err != nil {
 		return "", fmt.Errorf("create TTS request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Do(req)
@@ -601,6 +593,94 @@ func generateSegmentAudio(segment DialogueSegment, bookID uint, segmentIndex int
 	}
 
 	return path, nil
+}
+
+// elevenTTSPayload is the ElevenLabs /text-to-speech request body.
+type elevenTTSPayload struct {
+	Text          string              `json:"text"`
+	ModelID       string              `json:"model_id"`
+	VoiceSettings elevenVoiceSettings `json:"voice_settings"`
+}
+
+// elevenVoiceSettings tunes Eleven delivery. Stability 0.5 = "Natural" (the
+// balanced v3 mode: expressive but stable for long-form); style adds emphasis.
+type elevenVoiceSettings struct {
+	Stability       float64 `json:"stability"`
+	SimilarityBoost float64 `json:"similarity_boost"`
+	Style           float64 `json:"style"`
+	UseSpeakerBoost bool    `json:"use_speaker_boost"`
+}
+
+// elevenEmotionTag maps our bounded emotion enum to an Eleven v3 inline audio
+// tag, prepended to the line so the model performs it. Empty for neutral.
+func elevenEmotionTag(emotion string) string {
+	switch strings.ToLower(strings.TrimSpace(emotion)) {
+	case "angry":
+		return "[angry] "
+	case "sad":
+		return "[sad] "
+	case "happy":
+		return "[happy] "
+	case "fearful":
+		return "[nervous] "
+	case "excited":
+		return "[excited] "
+	case "tender":
+		return "[warmly] "
+	case "whispering":
+		return "[whispers] "
+	case "shouting":
+		return "[shouts] "
+	case "sarcastic":
+		return "[sarcastic] "
+	default:
+		return ""
+	}
+}
+
+// buildTTSRequest constructs the provider-specific HTTP request for one segment.
+// OpenAI-compatible engines (OpenAI, Kokoro) share one JSON shape; ElevenLabs
+// uses a per-voice URL, an xi-api-key header, and inline emotion tags.
+func buildTTSRequest(cfg *ttsEngineConfig, apiKey, text, voice, instructions string, speed float64, segment DialogueSegment) (*http.Request, error) {
+	if cfg.Provider == "elevenlabs" {
+		body := elevenTTSPayload{
+			Text:    elevenEmotionTag(segment.Emotion) + text,
+			ModelID: cfg.Model,
+			VoiceSettings: elevenVoiceSettings{
+				Stability:       0.5,
+				SimilarityBoost: 0.75,
+				Style:           0.35,
+				UseSpeakerBoost: true,
+			},
+		}
+		raw, _ := json.Marshal(body)
+		url := strings.TrimRight(cfg.Endpoint, "/") + "/" + voice + "?output_format=mp3_44100_128"
+		req, err := http.NewRequest("POST", url, bytes.NewReader(raw))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("xi-api-key", apiKey)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "audio/mpeg")
+		return req, nil
+	}
+
+	payload := TTSPayload{
+		Input:          text,
+		Model:          cfg.Model,
+		Voice:          voice,
+		Instructions:   instructions,
+		ResponseFormat: "mp3",
+		Speed:          speed,
+	}
+	raw, _ := json.Marshal(payload)
+	req, err := http.NewRequest("POST", cfg.Endpoint, bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	return req, nil
 }
 
 // mergeAudioSegments concatenates multiple audio files using FFmpeg
