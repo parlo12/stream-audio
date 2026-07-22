@@ -255,10 +255,14 @@ func getReferralInfoHandler(c *gin.Context) {
 
 // ValidateReceiptRequest matches what the iOS AppleIAPManager already sends.
 type ValidateReceiptRequest struct {
-	TransactionID string `json:"transaction_id" binding:"required"`
-	ProductID     string `json:"product_id" binding:"required"`
-	PurchaseDate  string `json:"purchase_date"`
-	OriginalID    string `json:"original_id"`
+	// SignedTransaction is the StoreKit 2 JWS (Transaction.jwsRepresentation) —
+	// the trusted source of the product id once verified. The plain fields below
+	// are legacy/diagnostic and are NOT trusted unless ALLOW_UNSIGNED_RECEIPTS.
+	SignedTransaction string `json:"signed_transaction"`
+	TransactionID     string `json:"transaction_id"`
+	ProductID         string `json:"product_id"`
+	PurchaseDate      string `json:"purchase_date"`
+	OriginalID        string `json:"original_id"`
 }
 
 // validateReceiptHandler — POST /user/subscription/validate-receipt
@@ -285,11 +289,33 @@ func validateReceiptHandler(c *gin.Context) {
 		return
 	}
 
-	// Resolve the purchased product to a tier. Unknown products are rejected so
-	// a spoofed/renamed id can't silently grant access.
-	tier, ok := productTier[req.ProductID]
+	// Resolve the product id from a CRYPTOGRAPHICALLY VERIFIED source. The
+	// signed transaction (StoreKit 2 JWS) is authoritative — its cert chain,
+	// signature, bundle id, and revocation/expiry are all checked. The plain
+	// product_id the client sends is only honoured behind ALLOW_UNSIGNED_RECEIPTS
+	// (legacy/dev transition), never in production.
+	var productID, txnID string
+	switch {
+	case req.SignedTransaction != "":
+		tx, err := verifySignedTransaction(req.SignedTransaction, getEnv("APPLE_BUNDLE_ID", "com.rmhrealestate.AudioBook"))
+		if err != nil {
+			log.Printf("⚠️ IAP verification failed for user %d: %v", userID, err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Receipt verification failed"})
+			return
+		}
+		productID, txnID = tx.ProductID, tx.TransactionID
+	case getEnv("ALLOW_UNSIGNED_RECEIPTS", "false") == "true":
+		productID, txnID = req.ProductID, req.TransactionID
+		log.Printf("⚠️ IAP legacy UNSIGNED path for user %d (product %s) — ALLOW_UNSIGNED_RECEIPTS on", userID, req.ProductID)
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Signed transaction required"})
+		return
+	}
+
+	// Map the verified product to a tier. Unknown products are rejected.
+	tier, ok := productTier[productID]
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Unknown product", "product_id": req.ProductID})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Unknown product", "product_id": productID})
 		return
 	}
 
@@ -307,7 +333,7 @@ func validateReceiptHandler(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not update account"})
 			return
 		}
-		log.Printf("✅ IAP receipt accepted for user %d (tx %s, product %s) — account_type=%s", user.ID, req.TransactionID, req.ProductID, tier)
+		log.Printf("✅ IAP verified for user %d (tx %s, product %s) — account_type=%s", user.ID, txnID, productID, tier)
 	}
 
 	awardReferralCredit(&user, "apple_iap")
