@@ -225,28 +225,32 @@ func transcribePage(book Book, chunk BookChunk, userID uint, accountType string)
 		return nil // already done or in-flight elsewhere (don't double-consume quota)
 	}
 
-	// Consume one transcription page from the monthly budget (only on a fresh
-	// claim, so retries never double-count). On deny, release the claim and
-	// signal the batch to stop.
-	if d := checkAndConsume(userID, accountType, "transcribe_pages", 1, book.ID); !d.Allowed {
-		db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "pending")
-		return errQuotaExceeded
-	}
-
 	fail := func() { db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "failed") }
 
 	// Cross-user dedup: if this exact text+engine was already rendered for any
 	// book, reuse the shared audio and skip the whole pipeline (no TTS, brain,
-	// classifiers, foley, or music cost). Quota is still consumed above — it's
-	// the user's page, it just costs us nothing.
+	// classifiers, foley, or music cost). This is FREE — it costs us nothing —
+	// so it never touches the user's quota (unlimited library listening).
 	if reuseRenderedPageForChunk(book, chunk) {
 		return nil
+	}
+
+	// Fresh render (our real cost): gate on the user's monthly transcription-
+	// time budget. Only genuinely-new synthesis reaches here — cached pages
+	// returned above. On deny, release the claim and signal the batch to stop.
+	charge, qerr := consumeFreshTranscription(userID, accountType, book.ID)
+	if qerr != nil {
+		db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "pending")
+		return errQuotaExceeded
 	}
 
 	audioPath, err := convertTextToAudioForChunk(chunk)
 	if err != nil {
 		fail()
 		return err
+	}
+	if dur, derr := getTTSDuration(audioPath); derr == nil {
+		charge(dur) // meter the actual audio-seconds we synthesized
 	}
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(chunk.Content)))
 	// Audit H2: score-palette cue (one musical identity per book), with the
@@ -558,18 +562,24 @@ func lookAheadTranscribeChunk(book Book, chunk BookChunk, userID uint, accountTy
 	if claim.RowsAffected == 0 {
 		return nil // already done or in-flight elsewhere
 	}
-	if d := checkAndConsume(userID, accountType, "transcribe_pages", 1, book.ID); !d.Allowed {
-		db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "pending")
-		return errQuotaExceeded
-	}
-	// Cross-user dedup: reuse a shared rendering if this text+engine exists.
+	// Cross-user dedup: reuse a shared rendering if this text+engine exists —
+	// FREE, never charged to quota.
 	if reuseRenderedPageForChunk(book, chunk) {
 		return nil
+	}
+	// Fresh render: gate on the monthly transcription-time budget.
+	charge, qerr := consumeFreshTranscription(userID, accountType, book.ID)
+	if qerr != nil {
+		db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "pending")
+		return errQuotaExceeded
 	}
 	audioPath, err := convertTextToAudioForChunk(chunk)
 	if err != nil {
 		db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Update("tts_status", "failed")
 		return err
+	}
+	if dur, derr := getTTSDuration(audioPath); derr == nil {
+		charge(dur)
 	}
 	db.Model(&BookChunk{}).Where("id = ?", chunk.ID).Updates(map[string]interface{}{
 		"audio_path": audioPath,

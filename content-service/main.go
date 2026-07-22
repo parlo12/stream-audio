@@ -215,6 +215,9 @@ func main() {
 		// /chunks/audio-by-id) verify ownership inline in their handlers.
 		// Register this device's APNs token for push notifications.
 		authorized.POST("/device-token", RegisterDeviceTokenHandler)
+		// Monthly fresh-transcription budget for the current user (app shows
+		// "X hrs of new transcription left" + drives the upgrade prompt).
+		authorized.GET("/transcription-usage", transcriptionUsageHandler)
 
 		// User-submitted bug/problem report from the app.
 		authorized.POST("/bug-report", SubmitBugReportHandler)
@@ -802,8 +805,10 @@ func BatchTranscribeBookHandler(c *gin.Context) {
 	}
 
 	// Quota pre-check: deny up front if the user is already at their monthly
-	// transcription-page budget (per-page consumption happens in the worker).
-	if d := checkAndConsume(userID, accountType, "transcribe_pages", 0, book.ID); !d.Allowed {
+	// transcription-time budget (per-page, fresh-only consumption happens in the
+	// worker). Fail-fast so an over-cap user gets the paywall immediately rather
+	// than page-by-page.
+	if d := checkAndConsume(userID, accountType, "transcribe_seconds", 0, book.ID); !d.Allowed {
 		quota429(c, d)
 		return
 	}

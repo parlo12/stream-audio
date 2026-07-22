@@ -45,11 +45,8 @@ func ProcessChunksTTSHandler(c *gin.Context) {
 		return
 	}
 
-	// Quota: consume the transcription pages this request will process.
-	if d := checkAndConsume(getUserIDFromContext(c), accountType, "transcribe_pages", int64(len(req.Pages)), req.BookID); !d.Allowed {
-		quota429(c, d)
-		return
-	}
+	// Quota is charged per-page in the loop below — only on a cache MISS (fresh
+	// synthesis), by the rendered audio's duration. Cached pages are free.
 
 	// Convert pages (index + 1) to chunk indices for the specific book
 	var chunks []BookChunk
@@ -80,15 +77,28 @@ func ProcessChunksTTSHandler(c *gin.Context) {
 		db.Model(&chunk).Update("TTSStatus", "processing")
 
 		// Cross-user dedup: if this exact text+engine was already rendered for
-		// any book, reuse the shared audio and skip TTS + the whole merge.
+		// any book, reuse the shared audio and skip TTS + the whole merge —
+		// FREE, no quota.
 		if reuseRenderedPageForChunk(book, chunk) {
 			continue
+		}
+
+		// Fresh render: gate on the user's monthly transcription-time budget.
+		// At the cap → release the page and return the paywall (partial batch).
+		charge, qerr := consumeFreshTranscription(getUserIDFromContext(c), accountType, chunk.BookID)
+		if qerr != nil {
+			db.Model(&chunk).Update("TTSStatus", "pending")
+			quota429(c, checkAndConsume(getUserIDFromContext(c), accountType, "transcribe_seconds", 0, chunk.BookID))
+			return
 		}
 
 		audioPath, err := convertTextToAudioForChunk(chunk)
 		if err != nil {
 			db.Model(&chunk).Update("TTSStatus", "failed")
 			continue
+		}
+		if dur, derr := getTTSDuration(audioPath); derr == nil {
+			charge(dur)
 		}
 		chunk.AudioPath = audioPath
 		chunk.TTSStatus = "completed"
