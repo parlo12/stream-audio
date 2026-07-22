@@ -110,21 +110,35 @@ func resolveReferralCode(rawCode, signupDeviceID string) uint {
 	return referrer.ID
 }
 
-// effectiveAccountType is the single source of truth for tier checks: a user
-// is "paid" if their billing tier says so OR they hold unexpired referral
-// credit. Everything that reports account_type (JWT claims, /user/account-type,
-// profile, subscription status) must go through this.
+// effectiveAccountType is the single source of truth for tier checks. A user's
+// tier is their billing tier ("starter"/"premium", or legacy "paid"), OR
+// "premium" while they hold unexpired referral credit (a free month of the full
+// experience). Everything that reports account_type (JWT claims,
+// /user/account-type, profile, subscription status) must go through this, and
+// content-service's metering keys its per-tier limits on the exact value.
 func effectiveAccountType(user *User) string {
-	if user.AccountType == "paid" {
-		return "paid"
+	switch user.AccountType {
+	case "starter", "premium", "paid": // "paid" retained for pre-tier subscribers
+		return user.AccountType
 	}
 	if user.PremiumUntil != nil && user.PremiumUntil.After(time.Now()) {
-		return "paid"
+		return "premium"
 	}
 	if user.AccountType == "" {
 		return "free"
 	}
 	return user.AccountType
+}
+
+// productTier maps an App Store auto-renewable product id to an internal
+// metering tier. Tiers line up 1:1 with content-service plan_limits rows
+// (starter = 2h/mo new transcription, premium = 8h/mo). Adding an annual or
+// regional product is just another entry here — no other code changes.
+var productTier = map[string]string{
+	"com.narrafied.starter.monthly": "starter",
+	"com.narrafied.starter.yearly":  "starter",
+	"com.narrafied.premium.monthly": "premium",
+	"com.narrafied.premium.yearly":  "premium",
 }
 
 // extendPremiumUntil returns the new entitlement expiry after adding `months`:
@@ -271,8 +285,10 @@ func validateReceiptHandler(c *gin.Context) {
 		return
 	}
 
-	expectedProduct := getEnv("IAP_PRODUCT_ID", "com.narrafied.premium.monthly")
-	if req.ProductID != expectedProduct {
+	// Resolve the purchased product to a tier. Unknown products are rejected so
+	// a spoofed/renamed id can't silently grant access.
+	tier, ok := productTier[req.ProductID]
+	if !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Unknown product", "product_id": req.ProductID})
 		return
 	}
@@ -283,19 +299,22 @@ func validateReceiptHandler(c *gin.Context) {
 		return
 	}
 
-	if user.AccountType != "paid" {
-		if err := db.Model(&User{}).Where("id = ?", user.ID).Update("account_type", "paid").Error; err != nil {
+	// Set the user's tier to the purchased plan (idempotent: skip if unchanged).
+	// An upgrade/downgrade within the subscription group arrives here as the new
+	// product id, so this also handles tier switches.
+	if user.AccountType != tier {
+		if err := db.Model(&User{}).Where("id = ?", user.ID).Update("account_type", tier).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not update account"})
 			return
 		}
-		log.Printf("✅ IAP receipt accepted for user %d (tx %s) — account_type=paid", user.ID, req.TransactionID)
+		log.Printf("✅ IAP receipt accepted for user %d (tx %s, product %s) — account_type=%s", user.ID, req.TransactionID, req.ProductID, tier)
 	}
 
 	awardReferralCredit(&user, "apple_iap")
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":       "ok",
-		"account_type": "paid",
+		"account_type": tier,
 	})
 }
 
