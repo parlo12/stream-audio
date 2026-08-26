@@ -138,7 +138,9 @@ type SignupRequest struct {
 	Username    string `json:"username" binding:"required"`
 	Email       string `json:"email" binding:"required,email"`
 	Password    string `json:"password" binding:"required,min=6"`
-	State       string `json:"state" binding:"required"`
+	// Accepted for backward compatibility with older builds but NOT stored —
+	// the privacy label declares no address data (dropped 2026-08-26).
+	State       string `json:"state"`
 	// Device information for account restoration
 	PhoneNumber string `json:"phone_number"`
 	DeviceModel string `json:"device_model"`
@@ -617,7 +619,6 @@ func signupHandler(c *gin.Context) {
 		Password:    string(hashedPassword),
 		AccountType: "free",
 		IsPublic:    true,
-		State:       req.State,
 		PhoneNumber: req.PhoneNumber,
 		DeviceModel: req.DeviceModel,
 		DeviceID:    req.DeviceID,
