@@ -33,7 +33,7 @@ const defaultAppConfigPayload = `{
     "offline_listening": false
   },
   "pricing": {
-    "monthly_price_display": "$24.99",
+    "monthly_price_display": "$14.99",
     "iap_product_id": "com.narrafied.premium.monthly"
   },
   "strings": {
