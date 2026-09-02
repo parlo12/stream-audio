@@ -367,6 +367,8 @@ func main() {
 	admin.Use(authMiddleware(), adminMiddleware(), auditMiddleware())
 	{
 		admin.GET("/stats", getAdminStatsHandler)
+		// Send one promotional offer email to yourself to test the pipeline
+		admin.GET("/offer-test", adminOfferTestHandler)
 		admin.GET("/users", listUsersHandler)
 		admin.GET("/users/active", getActiveUsersHandler)
 		admin.POST("/users/:user_id/admin", makeUserAdminHandler)

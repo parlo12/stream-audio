@@ -150,6 +150,36 @@ func offerUnsubscribeHandler(c *gin.Context) {
 	c.String(http.StatusOK, "You've been unsubscribed from Narrafied promotional emails. You'll still receive essential account emails.")
 }
 
+// adminOfferTestHandler (admin GET /admin/offer-test?kind=abandon|winback&to=…)
+// sends one real offer email using the caller's own account, so the full
+// email→/offer/ checkout path can be verified without enabling the mass loop.
+func adminOfferTestHandler(c *gin.Context) {
+	claims, _ := c.Get("claims")
+	uid := uint(claims.(jwt.MapClaims)["user_id"].(float64))
+	var u User
+	if err := db.First(&u, uid).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "user not found"})
+		return
+	}
+	kind := c.DefaultQuery("kind", "abandon")
+	if kind != "winback" {
+		kind = "abandon"
+	}
+	to := c.DefaultQuery("to", u.Email)
+	tok, err := offerToken(uid, kind)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	subject, html, text := offerContent(kind,
+		offerBaseURL()+"/offer/"+tok, offerBaseURL()+"/unsubscribe/"+tok)
+	if err := sendEmail(to, subject, html, text); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"sent": true, "to": to, "kind": kind, "email_configured": emailConfigured()})
+}
+
 // offerEmailLoop scans hourly for eligible users. Disabled unless
 // OFFER_EMAILS_ENABLED=true, so nothing sends until deliberately switched on.
 func offerEmailLoop() {
