@@ -83,6 +83,9 @@ type User struct {
 	ReferralCode *string    `gorm:"uniqueIndex"` // shareable invite code, lazily generated
 	ReferredBy   uint       `gorm:"index"`       // user id of the referrer; 0 = organic signup
 	PremiumUntil *time.Time                      // referral-credit premium entitlement expiry
+	// Promotional-pricing engine (see offers.go)
+	SubscriptionCanceledAt *time.Time            // set when a paid sub is deleted; powers win-back
+	MarketingOptOut        bool   `gorm:"default:false"` // CAN-SPAM opt-out for promo email
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 }
@@ -291,6 +294,10 @@ func main() {
 	// Surface any missing social-login configuration up front.
 	validateSocialLoginConfig()
 
+	// Promotional-pricing email engine (offers.go). No-op unless
+	// OFFER_EMAILS_ENABLED=true; runs in the background.
+	go offerEmailLoop()
+
 	// Set Gin mode based on environment variable; default to release
 	ginMode := os.Getenv("GIN_MODE")
 	if ginMode == "" {
@@ -311,6 +318,9 @@ func main() {
 	router.POST("/restore-account", restoreAccountHandler)
 	// Referral invite link → download destination (public; see referral.go)
 	router.GET("/invite/:code", inviteRedirectHandler)
+	// Promotional offer links from email (public; token-authenticated; offers.go)
+	router.GET("/offer/:token", offerCheckoutHandler)
+	router.GET("/unsubscribe/:token", offerUnsubscribeHandler)
 
 	// Social login endpoints (public)
 	auth := router.Group("/auth")
@@ -541,7 +551,7 @@ func setupDatabase() {
 	configureConnPool(db)
 
 	// Run migrations
-	if err := db.AutoMigrate(&User{}, &UserHistory{}, &UserBookHistory{}, &ProcessedStripeEvent{}, &AuditLog{}, &ReferralCredit{}); err != nil {
+	if err := db.AutoMigrate(&User{}, &UserHistory{}, &UserBookHistory{}, &ProcessedStripeEvent{}, &AuditLog{}, &ReferralCredit{}, &OfferEmail{}); err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
 	}
 
@@ -746,9 +756,12 @@ func createCheckoutSessionHandler(c *gin.Context) {
 	// 5. Create Stripe Checkout session.
 	// B7: bill a SINGLE subscription price from config — the previous code
 	// added two line items, double-charging every subscriber.
-	priceID := getEnv("STRIPE_PRICE_ID", "")
+	// New checkouts bill the ANCHOR price ($18.99); the discounted floor price
+	// is reached only through an offer link (offers.go). Falls back to the
+	// legacy single price if the anchor isn't configured yet.
+	priceID := getEnv("STRIPE_PRICE_PREMIUM_ANCHOR", getEnv("STRIPE_PRICE_ID", ""))
 	if priceID == "" {
-		log.Printf("❌ STRIPE_PRICE_ID not configured")
+		log.Printf("❌ STRIPE_PRICE_PREMIUM_ANCHOR / STRIPE_PRICE_ID not configured")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Billing is not configured"})
 		return
 	}
@@ -886,6 +899,9 @@ func stripeWebhookHandler(c *gin.Context) {
 			return
 		}
 		updateUserAccountType(sub.Customer.ID, "free")
+		// Record the churn moment so the win-back loop can reach out 24h later.
+		db.Model(&User{}).Where("stripe_customer_id = ?", sub.Customer.ID).
+			Update("subscription_canceled_at", time.Now())
 
 	case "invoice.payment_failed":
 		// Grace: do NOT downgrade here. Stripe's dunning retries the charge;
@@ -912,6 +928,11 @@ func updateUserAccountType(customerID, newType string) {
 	}
 
 	user.AccountType = newType
+	if newType == "paid" {
+		// A (re)subscribe clears any prior churn marker so the win-back loop
+		// won't re-target someone who already came back.
+		user.SubscriptionCanceledAt = nil
+	}
 	if err := db.Save(&user).Error; err != nil {
 		log.Printf("❌ Failed to update user %d account type to %s: %v", user.ID, newType, err)
 		return
