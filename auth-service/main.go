@@ -193,12 +193,22 @@ type AppleSignInRequest struct {
 		GivenName  string `json:"given_name"`
 		FamilyName string `json:"family_name"`
 	} `json:"full_name"` // Only provided on first sign-in
+	SocialSignupExtras
+}
+
+// SocialSignupExtras carries the optional referral invite code + device id on
+// social sign-in. Only used when the sign-in creates a new account (same rules
+// as /register: invalid or self-referral codes are ignored, never blocking).
+type SocialSignupExtras struct {
+	ReferralCode string `json:"referral_code"`
+	DeviceID     string `json:"device_id"`
 }
 
 // GoogleSignInRequest for POST /auth/google
 type GoogleSignInRequest struct {
 	IDToken     string `json:"id_token" binding:"required"`
 	AccessToken string `json:"access_token"` // Optional
+	SocialSignupExtras
 }
 
 // FacebookLoginRequest for POST /auth/facebook
@@ -2405,7 +2415,7 @@ func appleSignInHandler(c *gin.Context) {
 	}
 
 	// Handle social login (find or create user)
-	user, isNewUser, err := handleSocialLogin("apple", appleUserID, email, req.FullName.GivenName, req.FullName.FamilyName, "", emailVerified)
+	user, isNewUser, err := handleSocialLogin("apple", appleUserID, email, req.FullName.GivenName, req.FullName.FamilyName, "", emailVerified, req.SocialSignupExtras)
 	if err != nil {
 		if errors.Is(err, ErrLinkRequiresVerification) {
 			c.JSON(http.StatusConflict, gin.H{"error": "link_requires_verification", "message": err.Error()})
@@ -2457,7 +2467,7 @@ func googleSignInHandler(c *gin.Context) {
 
 	// Handle social login (find or create user)
 	emailVerified := tokenInfo.EmailVerified == "true"
-	user, isNewUser, err := handleSocialLogin("google", tokenInfo.SUB, tokenInfo.Email, tokenInfo.GivenName, tokenInfo.FamilyName, tokenInfo.Picture, emailVerified)
+	user, isNewUser, err := handleSocialLogin("google", tokenInfo.SUB, tokenInfo.Email, tokenInfo.GivenName, tokenInfo.FamilyName, tokenInfo.Picture, emailVerified, req.SocialSignupExtras)
 	if err != nil {
 		if errors.Is(err, ErrLinkRequiresVerification) {
 			c.JSON(http.StatusConflict, gin.H{"error": "link_requires_verification", "message": err.Error()})
@@ -2517,7 +2527,7 @@ func facebookLoginHandler(c *gin.Context) {
 
 	// Handle social login (find or create user). Facebook's Graph API does not
 	// expose an email-verified flag, so we never auto-link by email.
-	user, isNewUser, err := handleSocialLogin("facebook", fbUser.ID, fbUser.Email, firstName, lastName, fbUser.Picture.Data.URL, false)
+	user, isNewUser, err := handleSocialLogin("facebook", fbUser.ID, fbUser.Email, firstName, lastName, fbUser.Picture.Data.URL, false, SocialSignupExtras{})
 	if err != nil {
 		if errors.Is(err, ErrLinkRequiresVerification) {
 			c.JSON(http.StatusConflict, gin.H{"error": "link_requires_verification", "message": err.Error()})
@@ -2842,7 +2852,7 @@ var ErrLinkRequiresVerification = errors.New("email matches an existing account;
 // handleSocialLogin finds or creates a user for social login. emailVerified
 // must reflect whether the provider cryptographically asserted that this email
 // belongs to the user; it gates auto-linking to a pre-existing email account.
-func handleSocialLogin(provider, providerUserID, email, firstName, lastName, profilePicture string, emailVerified bool) (*User, bool, error) {
+func handleSocialLogin(provider, providerUserID, email, firstName, lastName, profilePicture string, emailVerified bool, extras SocialSignupExtras) (*User, bool, error) {
 	var user User
 	var isNewUser bool
 
@@ -2923,6 +2933,8 @@ func handleSocialLogin(provider, providerUserID, email, firstName, lastName, pro
 		ProfilePictureURL: profilePicture,
 		IsPublic:          true,
 		LastActiveAt:      time.Now(),
+		DeviceID:          extras.DeviceID,
+		ReferredBy:        resolveReferralCode(extras.ReferralCode, extras.DeviceID),
 	}
 
 	// Set the provider-specific user ID

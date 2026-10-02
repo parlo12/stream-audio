@@ -64,7 +64,9 @@ func TestEffectiveAccountType(t *testing.T) {
 	}{
 		{"paid billing", User{AccountType: "paid"}, "paid"},
 		{"free no credit", User{AccountType: "free"}, "free"},
-		{"free with active credit", User{AccountType: "free", PremiumUntil: &future}, "paid"},
+		{"free with active credit", User{AccountType: "free", PremiumUntil: &future}, "premium"},
+		{"starter billing", User{AccountType: "starter"}, "starter"},
+		{"premium billing", User{AccountType: "premium"}, "premium"},
 		{"free with expired credit", User{AccountType: "free", PremiumUntil: &past}, "free"},
 		{"empty type", User{}, "free"},
 		{"paid with expired credit stays paid", User{AccountType: "paid", PremiumUntil: &past}, "paid"},
