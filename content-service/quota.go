@@ -66,6 +66,9 @@ func seedPlanLimits() {
 		// transcription); starter = 2h; premium = 8h. "paid" aliases premium
 		// until App-Store IAP products map users to starter/premium.
 		{AccountType: "free", Metric: "transcribe_seconds", MonthlyLimit: 0, HardCap: true},
+		// Free accounts may narrate public-domain Free Books (2h/month) so the
+		// free tier can actually listen; own uploads still need a plan.
+		{AccountType: "free", Metric: "freebook_seconds", MonthlyLimit: 7200, HardCap: true},
 		{AccountType: "starter", Metric: "transcribe_seconds", MonthlyLimit: 7200, HardCap: true},
 		{AccountType: "premium", Metric: "transcribe_seconds", MonthlyLimit: 28800, HardCap: true},
 		{AccountType: "paid", Metric: "transcribe_seconds", MonthlyLimit: 28800, HardCap: true},
@@ -185,12 +188,34 @@ func addUsage(userID uint, accountType, metric string, amount int64, bookID uint
 // user is at their cap; otherwise a charge() to call with the rendered audio's
 // duration in seconds after a successful render.
 func consumeFreshTranscription(userID uint, accountType string, bookID uint) (func(seconds float64), error) {
-	if d := checkAndConsume(userID, accountType, "transcribe_seconds", 0, bookID); !d.Allowed {
+	metric := transcriptionMetric(accountType, isPublicDomainBook(bookID))
+	if d := checkAndConsume(userID, accountType, metric, 0, bookID); !d.Allowed {
 		return nil, errQuotaExceeded
 	}
 	return func(seconds float64) {
-		addUsage(userID, accountType, "transcribe_seconds", int64(seconds+0.5), bookID)
+		addUsage(userID, accountType, metric, int64(seconds+0.5), bookID)
 	}, nil
+}
+
+// transcriptionMetric picks the budget a fresh render is charged to. Free
+// accounts narrate public-domain Free Books from their own allowance
+// (freebook_seconds); everything else uses transcribe_seconds.
+func transcriptionMetric(accountType string, publicDomain bool) string {
+	if accountType == "free" && publicDomain {
+		return "freebook_seconds"
+	}
+	return "transcribe_seconds"
+}
+
+// isPublicDomainBook reports whether a book came from the Free Books import.
+// Books imported before the Source column existed are recognized by the
+// Category/Genre pair importTextBook has always set.
+func isPublicDomainBook(bookID uint) bool {
+	var b Book
+	if err := db.Select("source", "category", "genre").First(&b, bookID).Error; err != nil {
+		return false
+	}
+	return b.Source == "public_domain" || (b.Category == "Classics" && b.Genre == "Classic")
 }
 
 // transcriptionUsageHandler (GET /user/transcription-usage) reports the caller's

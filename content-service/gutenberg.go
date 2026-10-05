@@ -270,6 +270,7 @@ func importTextBook(c *gin.Context, userID uint, accountType, title, author stri
 		Author:   author,
 		Category: "Classics",
 		Genre:    "Classic",
+		Source:   "public_domain",
 		Status:   "parsing",
 		UserID:   userID,
 	}

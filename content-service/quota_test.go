@@ -33,3 +33,22 @@ func TestPauseAheadDefault(t *testing.T) {
 		t.Fatalf("pauseAheadPages with env = %d, want 20", pauseAheadPages())
 	}
 }
+
+func TestTranscriptionMetric(t *testing.T) {
+	cases := []struct {
+		tier string
+		pd   bool
+		want string
+	}{
+		{"free", true, "freebook_seconds"},
+		{"free", false, "transcribe_seconds"},
+		{"starter", true, "transcribe_seconds"},
+		{"premium", true, "transcribe_seconds"},
+		{"paid", false, "transcribe_seconds"},
+	}
+	for _, c := range cases {
+		if got := transcriptionMetric(c.tier, c.pd); got != c.want {
+			t.Errorf("transcriptionMetric(%q, %v) = %q, want %q", c.tier, c.pd, got, c.want)
+		}
+	}
+}

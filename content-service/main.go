@@ -59,6 +59,7 @@ type Book struct {
 	VoiceMap     string `gorm:"type:text"` // JSON character→{gender,voice} cast (voice continuity, audit H1)
 	ScorePalette string `gorm:"type:text"` // JSON []ScoreCue — per-book music palette (audit H2)
 	AudioProfile string `gorm:"type:text"`
+	Source       string `gorm:"size:32;index"` // "public_domain" for Free Books imports (free-tier narration allowance)
 	TTSEngine    string `gorm:"size:32"` // voice engine pinned at creation ("openai"|"kokoro"; empty = openai) // JSON AudioProfile — fiction/genre/era (audit H3)
 	Index       int    // Index of the book in the list
 	CreatedAt   time.Time
