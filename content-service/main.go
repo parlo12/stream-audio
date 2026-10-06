@@ -854,6 +854,11 @@ func BatchTranscribeBookHandler(c *gin.Context) {
 
 // accountTypeFromClaims returns the account_type embedded in the JWT, or "" if
 // the token predates that claim (issued before Phase 5 deploy).
+// accountTypeFromClaims returns the caller's CURRENT tier. The JWT's
+// account_type is frozen at login, so a user who subscribes (IAP/Stripe) or
+// earns referral credit would keep free limits until they re-login. Read the
+// live tier from the shared users table (same rules as auth-service's
+// effectiveAccountType) and fall back to the claim only if the lookup fails.
 func accountTypeFromClaims(c *gin.Context) string {
 	claims, exists := c.Get("claims")
 	if !exists {
@@ -864,7 +869,36 @@ func accountTypeFromClaims(c *gin.Context) string {
 		return ""
 	}
 	at, _ := mc["account_type"].(string)
+	if uid, ok := mc["user_id"].(float64); ok && db != nil {
+		if live, ok := liveAccountType(uint(uid)); ok {
+			return live
+		}
+	}
 	return at
+}
+
+// liveAccountType mirrors auth-service effectiveAccountType: billing tier, or
+// "premium" while unexpired referral credit, else "free".
+func liveAccountType(userID uint) (string, bool) {
+	var u struct {
+		AccountType  string
+		PremiumUntil *time.Time
+	}
+	if err := db.Table("users").Select("account_type, premium_until").Where("id = ?", userID).Scan(&u).Error; err != nil || u.AccountType == "" {
+		return "", false
+	}
+	return effectiveTier(u.AccountType, u.PremiumUntil, time.Now()), true
+}
+
+func effectiveTier(accountType string, premiumUntil *time.Time, now time.Time) string {
+	switch accountType {
+	case "starter", "premium", "paid":
+		return accountType
+	}
+	if premiumUntil != nil && premiumUntil.After(now) {
+		return "premium"
+	}
+	return "free"
 }
 
 func getUserIDFromContext(c *gin.Context) uint {

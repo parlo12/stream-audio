@@ -52,3 +52,25 @@ func TestTranscriptionMetric(t *testing.T) {
 		}
 	}
 }
+
+func TestEffectiveTier(t *testing.T) {
+	now := time.Now()
+	future, past := now.Add(time.Hour), now.Add(-time.Hour)
+	cases := []struct {
+		at   string
+		pu   *time.Time
+		want string
+	}{
+		{"starter", nil, "starter"},
+		{"premium", nil, "premium"},
+		{"paid", &past, "paid"},
+		{"free", &future, "premium"},
+		{"free", &past, "free"},
+		{"free", nil, "free"},
+	}
+	for _, c := range cases {
+		if got := effectiveTier(c.at, c.pu, now); got != c.want {
+			t.Errorf("effectiveTier(%q) = %q, want %q", c.at, got, c.want)
+		}
+	}
+}
